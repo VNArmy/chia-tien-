@@ -1,6 +1,7 @@
 package com.example.ui.screens
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -22,6 +23,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -46,12 +48,14 @@ fun DashboardScreen(
     onOpenExportReport: () -> Unit,
     onOpenCreateTrip: () -> Unit,
     onOpenUserGuide: () -> Unit = {},
+    onRequestAiInsight: () -> Unit = {},
     onSwitchUser: (String) -> Unit,
     onSelectTrip: (String) -> Unit = {},
     onEditTrip: (TripEntity, String, String, Long, Long) -> Unit = { _, _, _, _, _ -> },
     onDeleteTrip: (TripEntity) -> Unit = {}
 ) {
     val lang = LocalAppLanguage.current
+    val isSettled = uiState.currentTrip?.isSettled == true
     var showUserPicker by remember { mutableStateOf(false) }
     var tripToEdit by remember { mutableStateOf<TripEntity?>(null) }
     var tripToDelete by remember { mutableStateOf<TripEntity?>(null) }
@@ -71,6 +75,86 @@ fun DashboardScreen(
                 onOpenUserPicker = { showUserPicker = true },
                 onSelectTrip = onSelectTrip
             )
+        }
+
+        if (uiState.allTrips.isEmpty()) {
+            item {
+                Card(
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    border = BorderStroke(1.dp, Color(0xFFE2E8F0)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Icon(
+                            Icons.Filled.CardTravel,
+                            contentDescription = null,
+                            modifier = Modifier.size(48.dp),
+                            tint = EmeraldPrimary
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            text = "Chưa Có Đoàn Công Tác Nào",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 16.sp,
+                            color = Color(0xFF1E293B)
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = "Ứng dụng sạch sẽ và sẵn sàng sử dụng. Bắt đầu bằng cách tạo đoàn công tác mới để quản lý chi tiêu và chia tiền.",
+                            fontSize = 13.sp,
+                            color = Color(0xFF64748B),
+                            textAlign = TextAlign.Center
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Button(
+                            onClick = onOpenCreateTrip,
+                            colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary)
+                        ) {
+                            Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Tạo Đoàn Công Tác Mới")
+                        }
+                    }
+                }
+            }
+        }
+
+        if (isSettled) {
+            item {
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = Color(0xFFF1F5F9),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFCBD5E1)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(Icons.Filled.Lock, contentDescription = null, tint = Color(0xFF64748B), modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column {
+                            Text(
+                                text = "Sổ Chuyến Đi Đã Được Khóa Quyết Toán",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF334155)
+                            )
+                            Text(
+                                text = "Mọi khoản chi tiêu và nộp quỹ đã được niêm phong an toàn để đối soát và chuyển khoản.",
+                                fontSize = 11.sp,
+                                color = Color(0xFF64748B)
+                            )
+                        }
+                    }
+                }
+            }
         }
 
         // User Guide Banner Link
@@ -151,6 +235,92 @@ fun DashboardScreen(
                                 tint = Color.White,
                                 modifier = Modifier.size(14.dp)
                             )
+                        }
+                    }
+                }
+            }
+        }
+
+        if (uiState.currentTrip != null) {
+            item {
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = Color(0xFFF5F3FF),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFDDD6FE)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .clickable { onRequestAiInsight() }
+                        .testTag("dashboard_ai_advisor_banner")
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            modifier = Modifier.weight(1f),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(CircleShape)
+                                    .background(
+                                        androidx.compose.ui.graphics.Brush.linearGradient(
+                                            listOf(Color(0xFF6366F1), Color(0xFF8B5CF6))
+                                        )
+                                    ),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    Icons.Filled.AutoAwesome,
+                                    contentDescription = null,
+                                    tint = Color.White,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = if (lang == AppLanguage.VI) "AI Cố Vấn Chi Tiêu (Gemini)" else "Gemini Financial Advisor",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF4C1D95)
+                                )
+                                Text(
+                                    text = if (lang == AppLanguage.VI) "Phân tích ngân sách, cơ cấu chi tiêu và sức khỏe quỹ" else "Analyze budget, category split & fund health",
+                                    fontSize = 11.sp,
+                                    color = Color(0xFF6D28D9)
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.width(8.dp))
+
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = Color(0xFF7C3AED)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = if (lang == AppLanguage.VI) "Phân tích" else "Analyze",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
+                                )
+                                Icon(
+                                    Icons.AutoMirrored.Filled.ArrowForward,
+                                    contentDescription = null,
+                                    tint = Color.White,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                            }
                         }
                     }
                 }
@@ -402,6 +572,7 @@ fun DashboardScreen(
             ) {
                 Button(
                     onClick = onOpenAddExpense,
+                    enabled = !isSettled,
                     shape = RoundedCornerShape(12.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary),
                     contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp),
@@ -427,6 +598,7 @@ fun DashboardScreen(
 
                 FilledTonalButton(
                     onClick = onOpenAddFund,
+                    enabled = !isSettled && (uiState.currentMember?.role == "ADMIN" || uiState.currentMember?.role == "TREASURER"),
                     shape = RoundedCornerShape(12.dp),
                     colors = ButtonDefaults.filledTonalButtonColors(
                         containerColor = AmberTertiaryContainer,

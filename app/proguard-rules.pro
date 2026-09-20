@@ -1,21 +1,20 @@
-# Add project specific ProGuard rules here.
-# You can control the set of applied configuration files using the
-# proguardFiles setting in build.gradle.
-#
-# For more details, see
-#   http://developer.android.com/guide/developing/tools/proguard.html
+# ProGuard and R8 rules for TripFinance release builds
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
+-keepattributes *Annotation*,Signature,InnerClasses,EnclosingMethod
 
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
+# Room Database persistence
+-keep class * extends androidx.room.RoomDatabase
+-dontwarn androidx.room.paging.**
+-keep class com.example.data.entity.** { *; }
+-keep class com.example.data.dao.** { *; }
+-keep class com.example.data.db.** { *; }
 
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# Domain models, data transfer objects, and financial logic
+-keep class com.example.domain.model.** { *; }
+-keep class com.example.ui.viewmodel.** { *; }
+
+# Kotlin Coroutines
+-keepclassmembers class kotlinx.coroutines.** { *; }
+
+# Compose and AndroidX
+-dontwarn androidx.compose.**

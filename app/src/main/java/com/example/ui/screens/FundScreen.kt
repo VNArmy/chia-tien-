@@ -1,5 +1,6 @@
 package com.example.ui.screens
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -39,7 +40,8 @@ fun FundScreen(
     uiState: UiState,
     onOpenAddFund: () -> Unit
 ) {
-    val canAddFund = uiState.currentMember?.role == "ADMIN" || uiState.currentMember?.role == "TREASURER"
+    val isSettled = uiState.currentTrip?.isSettled == true
+    val canAddFund = !isSettled && (uiState.currentMember?.role == "ADMIN" || uiState.currentMember?.role == "TREASURER")
 
     Scaffold(
         floatingActionButton = {
@@ -66,6 +68,31 @@ fun FundScreen(
             verticalArrangement = Arrangement.spacedBy(14.dp),
             contentPadding = PaddingValues(top = 12.dp, bottom = 90.dp)
         ) {
+            if (isSettled) {
+                item {
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = Color(0xFFF1F5F9),
+                        border = BorderStroke(1.dp, Color(0xFFCBD5E1)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(Icons.Filled.Lock, contentDescription = null, tint = Color(0xFF64748B), modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Chuyến đi đã khóa sổ quyết toán. Dữ liệu quỹ đoàn được bảo vệ và không thể nộp thêm quỹ.",
+                                fontSize = 11.sp,
+                                color = Color(0xFF475569),
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                    }
+                }
+            }
+
             // Fund Overview Card
             item {
                 Card(
@@ -95,7 +122,22 @@ fun FundScreen(
                                 )
                             }
 
-                            if (canAddFund) {
+                            if (isSettled) {
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = Color(0xFFF1F5F9),
+                                    border = BorderStroke(1.dp, Color(0xFFCBD5E1))
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Icon(Icons.Filled.Lock, contentDescription = null, tint = Color(0xFF64748B), modifier = Modifier.size(14.dp))
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("Đã khóa", fontSize = 11.sp, color = Color(0xFF475569), fontWeight = FontWeight.Bold)
+                                    }
+                                }
+                            } else if (canAddFund) {
                                 Button(
                                     onClick = onOpenAddFund,
                                     colors = ButtonDefaults.buttonColors(containerColor = AmberTertiary),

@@ -44,13 +44,26 @@ object NumberFormatUtils {
         decimalSeparator = ','
     }
     private val formatter = DecimalFormat("#,###", symbols)
+    private val decimalFormatter = DecimalFormat("#,##0.##", symbols)
 
     fun formatVnd(amount: Long): String {
         return "${formatter.format(amount)} đ"
     }
 
+    fun formatVnd(amount: Double): String {
+        return "${formatter.format(kotlin.math.round(amount).toLong())} đ"
+    }
+
     fun formatCurrency(amount: Long, currency: String): String {
         return if (currency == "VND") formatVnd(amount) else "${formatter.format(amount)} $currency"
+    }
+
+    fun formatCurrency(amount: Double, currency: String): String {
+        return if (currency == "VND") {
+            formatVnd(kotlin.math.round(amount).toLong())
+        } else {
+            "${decimalFormatter.format(amount)} $currency"
+        }
     }
 }
 

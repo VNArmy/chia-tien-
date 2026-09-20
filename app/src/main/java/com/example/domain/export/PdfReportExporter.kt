@@ -302,8 +302,10 @@ object PdfReportExporter {
 
                     paint.color = Color.parseColor("#1E293B")
                     paint.style = Paint.Style.FILL
-                    canvas.drawText(tr.fromMember.name.take(16), margin + 6f, currentY + 13f, paint)
-                    canvas.drawText(tr.toMember.name.take(16), margin + 115f, currentY + 13f, paint)
+                    val fromName = if (tr.fromMember.id == "FUND_ORGANIZATION") "Quỹ chung đoàn" else tr.fromMember.name
+                    val toName = if (tr.toMember.id == "FUND_ORGANIZATION") "Quỹ chung đoàn" else tr.toMember.name
+                    canvas.drawText(fromName.take(20), margin + 6f, currentY + 13f, paint)
+                    canvas.drawText(toName.take(20), margin + 115f, currentY + 13f, paint)
 
                     paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
                     paint.color = Color.parseColor("#4338CA")
@@ -312,8 +314,8 @@ object PdfReportExporter {
                     paint.typeface = Typeface.DEFAULT
                     paint.color = Color.parseColor("#1E293B")
                     val bankInfo = "${tr.toMember.bankName ?: ""}: ${tr.toMember.bankAccount ?: "---"}"
-                    canvas.drawText(bankInfo.take(22), margin + 305f, currentY + 13f, paint)
-                    canvas.drawText(tr.transferNote.take(16), margin + 435f, currentY + 13f, paint)
+                    canvas.drawText(bankInfo.take(24), margin + 305f, currentY + 13f, paint)
+                    canvas.drawText(tr.transferNote.take(22), margin + 435f, currentY + 13f, paint)
 
                     paint.color = Color.parseColor("#E0E7FF")
                     paint.style = Paint.Style.STROKE

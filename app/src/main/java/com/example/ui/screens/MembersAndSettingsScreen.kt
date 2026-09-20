@@ -54,7 +54,8 @@ fun MembersAndSettingsScreen(
     onRemoveOrDeactivate: (TripMemberEntity) -> Unit,
     onUpdateRate: (currencyCode: String, rate: Double) -> Unit,
     onSelectLanguage: (AppLanguage) -> Unit = {},
-    onOpenUserGuide: () -> Unit = {}
+    onOpenUserGuide: () -> Unit = {},
+    onOpenBackupRestore: () -> Unit = {}
 ) {
     val lang = LocalAppLanguage.current
     val clipboardManager = LocalClipboardManager.current
@@ -68,7 +69,8 @@ fun MembersAndSettingsScreen(
     val currentMember = uiState.currentMember
     val isAdmin = currentMember?.role == "ADMIN"
     val isTreasurer = currentMember?.role == "TREASURER"
-    val canManageMembers = isAdmin || isTreasurer
+    val isSettled = uiState.currentTrip?.isSettled == true
+    val canManageMembers = !isSettled && (isAdmin || isTreasurer)
     val canViewAuditLogs = isAdmin || isTreasurer // SRS 5: Member KHÔNG được xem Audit Log kỹ thuật
 
     LazyColumn(
@@ -271,6 +273,69 @@ fun MembersAndSettingsScreen(
                         fontSize = 12.sp,
                         color = Color(0xFF475569),
                         lineHeight = 18.sp
+                    )
+                }
+            }
+        }
+
+        // Backup & Recovery Card
+        item {
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = IndigoSecondary.copy(alpha = 0.08f)),
+                border = BorderStroke(1.dp, IndigoSecondary.copy(alpha = 0.25f)),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onOpenBackupRestore() }
+                    .testTag("open_backup_restore_card")
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        modifier = Modifier.weight(1f),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(42.dp)
+                                .clip(CircleShape)
+                                .background(IndigoSecondary),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                Icons.Filled.CloudSync,
+                                contentDescription = null,
+                                tint = Color.White,
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column {
+                            Text(
+                                text = if (lang == AppLanguage.VI) "Sao Lưu & Khôi Phục CSDL" else "Backup & Data Recovery",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = if (lang == AppLanguage.VI) "Xuất JSON, phục hồi khi nâng cấp ứng dụng hoặc đổi máy" else "Export JSON, restore on app upgrade or device change",
+                                fontSize = 11.sp,
+                                color = Color(0xFF64748B)
+                            )
+                        }
+                    }
+
+                    Icon(
+                        Icons.AutoMirrored.Filled.ArrowForward,
+                        contentDescription = null,
+                        tint = IndigoSecondary,
+                        modifier = Modifier.size(18.dp)
                     )
                 }
             }

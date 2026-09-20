@@ -38,7 +38,10 @@ object SplitCalculator {
 
     /**
      * Chia theo tỷ lệ phần trăm (Ratio Split)
-     * Ràng buộc: Tổng % = 100%. Phần dư làm tròn bù vào người đầu tiên/người tạo.
+     * Ràng buộc: Tổng % phải bằng 100.0%.
+     * Chỉ bù chênh lệch làm tròn (vài đồng lẻ do số thập phân) KHI VÀ CHỈ KHI tổng % đạt 100%.
+     * Tuyệt đối không dồn chênh lệch tỷ lệ vào người trả tiền khi tổng chưa bằng 100%,
+     * và đảm bảo không bao giờ tạo ra số tiền âm.
      */
     fun calculateRatioSplit(
         totalAmount: Long,
@@ -47,24 +50,33 @@ object SplitCalculator {
     ): Pair<List<Pair<String, Long>>, Boolean> {
         if (memberRatios.isEmpty()) return emptyList<Pair<String, Long>>() to false
         val totalRatio = memberRatios.sumOf { it.second }
-        val isRatioValid = abs(totalRatio - 100.0) < 0.001
+        // Kiểm tra tổng tỷ lệ có bằng 100% không (cho phép sai số làm tròn số thực nhỏ 0.01%)
+        val isRatioValid = abs(totalRatio - 100.0) <= 0.01
 
         var currentSum = 0L
         val splits = memberRatios.map { (memberId, ratio) ->
-            val share = ((totalAmount * ratio) / 100.0).roundToLong()
+            val safeRatio = ratio.coerceAtLeast(0.0)
+            val share = ((totalAmount * safeRatio) / 100.0).roundToLong().coerceAtLeast(0L)
             currentSum += share
             memberId to share
         }.toMutableList()
 
-        // Bù chênh lệch làm tròn để SUM(splits) == totalAmount
-        val diff = totalAmount - currentSum
-        if (diff != 0L && splits.isNotEmpty()) {
-            val priorityIndex = if (primaryMemberId != null) {
-                splits.indexOfFirst { it.first == primaryMemberId }.takeIf { it >= 0 } ?: 0
-            } else 0
+        // Bù chênh lệch làm tròn số lẻ (vài đồng) KHI VÀ CHỈ KHI tổng tỷ lệ % đã đạt 100%
+        if (isRatioValid && splits.isNotEmpty()) {
+            val diff = totalAmount - currentSum
+            if (diff != 0L) {
+                val targetIndex = if (primaryMemberId != null) {
+                    val pIdx = splits.indexOfFirst { it.first == primaryMemberId }
+                    if (pIdx >= 0 && splits[pIdx].second + diff >= 0L) pIdx
+                    else splits.indices.maxByOrNull { splits[it].second } ?: 0
+                } else {
+                    splits.indices.maxByOrNull { splits[it].second } ?: 0
+                }
 
-            val current = splits[priorityIndex]
-            splits[priorityIndex] = current.first to (current.second + diff)
+                val current = splits[targetIndex]
+                val safeNewAmount = (current.second + diff).coerceAtLeast(0L)
+                splits[targetIndex] = current.first to safeNewAmount
+            }
         }
 
         return splits to isRatioValid
@@ -98,36 +110,74 @@ object SettlementEngine {
 
     /**
      * Thuật toán Tham Lam (Greedy Algorithm) Tối Ưu Hóa Dòng Tiền:
-     * - Ý tưởng cốt lõi: Luôn ưu tiên lấy người nợ nhiều nhất (Max Debtor) trả cho người đang được hệ thống nợ nhiều nhất (Max Creditor).
+     * - Ý tưởng cốt lõi: Luôn ưu tiên lấy bên nợ nhiều nhất (Max Debtor) trả cho bên đang được hệ thống nợ nhiều nhất (Max Creditor).
      * - Bằng cách triệt tiêu các khoản lớn trước, rút gọn đáng kể số lượng giao dịch chuyển khoản qua lại.
+     * - Khi đoàn có Quỹ chung còn dư (remainingFund > 0) hoặc bị chi vượt (remainingFund < 0):
+     *   Quỹ đoàn đóng vai trò là một bên tham gia quyết toán với số dư = -remainingFund.
+     *   - Nếu remainingFund > 0: Quỹ còn tiền thực tế trong tài khoản/két, mang số dư âm (-remainingFund)
+     *     -> Đóng vai trò Debtor (Thủ quỹ trích tiền quỹ chi trả cho thành viên đã chi hộ nhiều).
+     *   - Nếu remainingFund < 0: Quỹ bị chi vượt, mang số dư dương
+     *     -> Đóng vai trò Creditor (Thành viên nộp bù tiền vào quỹ đoàn).
+     * - Đối soát chuẩn: Tổng balance của toàn bộ thành viên luôn bằng remainingFund.
+     *   Khi cộng thêm số dư Quỹ (-remainingFund), tổng đại số toàn hệ thống luôn bằng 0.
      * - Tránh lỗi vô cực: Dùng EPSILON (0.001) làm mốc so sánh triệt tiêu hoàn toàn rủi ro sai số thập phân.
      * - Khóa chặt đầu ra: Trả về danh sách SettlementTransfer tinh gọn (Người gửi, Người nhận, Số tiền, Nội dung chuyển khoản).
      */
     fun computeSimplifiedTransfers(
         memberStatuses: List<MemberFinancialStatus>,
-        tripJoinCode: String
+        tripJoinCode: String,
+        remainingFund: Long = 0L,
+        fundHolder: TripMemberEntity? = null
     ): List<SettlementTransfer> {
-        // Kiểm tra đối soát: Tổng balance toàn đoàn phải xấp xỉ 0 (trong giới hạn sai số cho phép)
-        val totalBalance = memberStatuses.sumOf { it.balance.toDouble() }
-        if (abs(totalBalance) > 5.0) {
+        val totalMemberBalance = memberStatuses.sumOf { it.balance.toDouble() }
+        // Kiểm tra đối soát: Tổng balance toàn đoàn trừ đi số quỹ còn lại phải xấp xỉ 0
+        val discrepancy = totalMemberBalance - remainingFund.toDouble()
+        if (abs(discrepancy) > 5.0) {
             // Có chênh lệch đối soát chưa cân bằng
             return emptyList()
         }
 
         data class BalanceEntry(val member: TripMemberEntity, var balance: Double)
 
+        val balanceEntries = mutableListOf<BalanceEntry>()
+        memberStatuses.forEach {
+            balanceEntries.add(BalanceEntry(it.member, it.balance.toDouble()))
+        }
+
+        // Nếu quỹ còn dư hoặc bị chi vượt, đưa Quỹ đoàn vào quyết toán như một bên tham gia
+        if (remainingFund != 0L) {
+            val fundMemberName = if (fundHolder != null) {
+                if (fundHolder.role == "TREASURER") "Quỹ đoàn (Thủ quỹ: ${fundHolder.name})"
+                else "Quỹ đoàn (${fundHolder.name})"
+            } else "Quỹ chung đoàn"
+
+            val fundMember = TripMemberEntity(
+                id = "FUND_ORGANIZATION",
+                tripId = fundHolder?.tripId ?: "",
+                userId = "fund",
+                name = fundMemberName,
+                role = "TREASURER",
+                isActive = true,
+                bankName = fundHolder?.bankName,
+                bankAccount = fundHolder?.bankAccount,
+                bankAccountHolder = fundHolder?.bankAccountHolder ?: fundHolder?.name?.uppercase(),
+                joinedAt = 0L
+            )
+            // Quỹ có số dư = -remainingFund
+            balanceEntries.add(BalanceEntry(fundMember, -remainingFund.toDouble()))
+        }
+
         // 1. Phân loại và sắp xếp giảm dần:
-        // Creditors: Người có balance > EPSILON (được nhận lại tiền)
-        val creditors = memberStatuses
-            .filter { it.balance.toDouble() > EPSILON }
-            .map { BalanceEntry(it.member, it.balance.toDouble()) }
+        // Creditors: Bên có balance > EPSILON (được nhận lại tiền)
+        val creditors = balanceEntries
+            .filter { it.balance > EPSILON }
             .sortedByDescending { it.balance }
             .toMutableList()
 
-        // Debtors: Người có balance < -EPSILON (phải trả thêm tiền)
-        val debtors = memberStatuses
-            .filter { it.balance.toDouble() < -EPSILON }
-            .map { BalanceEntry(it.member, -it.balance.toDouble()) }
+        // Debtors: Bên có balance < -EPSILON (phải trả / chuyển tiền đi)
+        val debtors = balanceEntries
+            .filter { it.balance < -EPSILON }
+            .map { BalanceEntry(it.member, -it.balance) }
             .sortedByDescending { it.balance }
             .toMutableList()
 
@@ -155,7 +205,11 @@ object SettlementEngine {
             val settleAmount = settleDouble.roundToLong()
 
             if (settleAmount > 0) {
-                val transferNote = "[$tripJoinCode] ${debtor.member.name} quyet toan cho ${creditor.member.name}"
+                val transferNote = when {
+                    debtor.member.id == "FUND_ORGANIZATION" -> "[$tripJoinCode] Trich Quy doan quyet toan cho ${creditor.member.name}"
+                    creditor.member.id == "FUND_ORGANIZATION" -> "[$tripJoinCode] ${debtor.member.name} nop bu thieu hut Quy doan"
+                    else -> "[$tripJoinCode] ${debtor.member.name} quyet toan cho ${creditor.member.name}"
+                }
 
                 transfers.add(
                     SettlementTransfer(

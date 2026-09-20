@@ -57,6 +57,8 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun TripFinanceApp(viewModel: TripFinanceViewModel) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val aiInsight by viewModel.aiInsight.collectAsStateWithLifecycle()
+    val isLoadingAi by viewModel.isLoadingAi.collectAsStateWithLifecycle()
     val lang = uiState.language
     var currentTab by remember { mutableStateOf(NavigationTab.DASHBOARD) }
 
@@ -65,6 +67,7 @@ fun TripFinanceApp(viewModel: TripFinanceViewModel) {
     var showAddFundDialog by remember { mutableStateOf(false) }
     var showCreateTripDialog by remember { mutableStateOf(false) }
     var showExportReportDialog by remember { mutableStateOf(false) }
+    var showBackupRestoreDialog by remember { mutableStateOf(false) }
     var showUserGuideScreen by remember { mutableStateOf(false) }
 
     val snackbarHostState = remember { SnackbarHostState() }
@@ -158,6 +161,18 @@ fun TripFinanceApp(viewModel: TripFinanceViewModel) {
                                 imageVector = Icons.Outlined.HelpOutline,
                                 contentDescription = if (lang == AppLanguage.VI) "Hướng dẫn sử dụng" else "User Guide",
                                 tint = Color(0xFF2563EB)
+                            )
+                        }
+
+                        // Backup & Recovery Button in TopAppBar
+                        IconButton(
+                            onClick = { showBackupRestoreDialog = true },
+                            modifier = Modifier.testTag("backup_restore_top_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.CloudSync,
+                                contentDescription = if (lang == AppLanguage.VI) "Sao lưu & Khôi phục" else "Backup & Recover",
+                                tint = EmeraldPrimary
                             )
                         }
 
@@ -269,8 +284,17 @@ fun TripFinanceApp(viewModel: TripFinanceViewModel) {
                         onNavigateToExpenses = { currentTab = NavigationTab.EXPENSES },
                         onNavigateToFund = { currentTab = NavigationTab.FUND },
                         onNavigateToSettlement = { currentTab = NavigationTab.SETTLEMENT },
-                        onOpenAddExpense = { showAddExpenseDialog = true },
-                        onOpenAddFund = { showAddFundDialog = true },
+                        onRequestAiInsight = { viewModel.requestAiSpendingInsight() },
+                        onOpenAddExpense = {
+                            if (uiState.currentTrip?.isSettled != true) {
+                                showAddExpenseDialog = true
+                            }
+                        },
+                        onOpenAddFund = {
+                            if (uiState.currentTrip?.isSettled != true) {
+                                showAddFundDialog = true
+                            }
+                        },
                         onOpenExportReport = { showExportReportDialog = true },
                         onOpenCreateTrip = { showCreateTripDialog = true },
                         onOpenUserGuide = { showUserGuideScreen = true },
@@ -283,7 +307,11 @@ fun TripFinanceApp(viewModel: TripFinanceViewModel) {
                     )
                     NavigationTab.EXPENSES -> ExpensesScreen(
                         uiState = uiState,
-                        onOpenAddExpense = { showAddExpenseDialog = true },
+                        onOpenAddExpense = {
+                            if (uiState.currentTrip?.isSettled != true) {
+                                showAddExpenseDialog = true
+                            }
+                        },
                         onEditExpense = { expId, title, cat, payerType, payerId, amount, curr, rate, splitType, splits, note, time ->
                             viewModel.editExpense(expId, title, cat, payerType, payerId, amount, curr, rate, splitType, splits, note, time)
                         },
@@ -293,11 +321,16 @@ fun TripFinanceApp(viewModel: TripFinanceViewModel) {
                     )
                     NavigationTab.FUND -> FundScreen(
                         uiState = uiState,
-                        onOpenAddFund = { showAddFundDialog = true }
+                        onOpenAddFund = {
+                            if (uiState.currentTrip?.isSettled != true) {
+                                showAddFundDialog = true
+                            }
+                        }
                     )
                     NavigationTab.SETTLEMENT -> SettlementScreen(
                         uiState = uiState,
                         onFinalizeSettlement = { title -> viewModel.finalizeSettlement(title) },
+                        onReopenSettlement = { viewModel.reopenSettlement() },
                         onOpenExportReport = { showExportReportDialog = true }
                     )
                     NavigationTab.MEMBERS -> MembersAndSettingsScreen(
@@ -320,7 +353,8 @@ fun TripFinanceApp(viewModel: TripFinanceViewModel) {
                         onSelectLanguage = { newLang ->
                             viewModel.setLanguage(newLang)
                         },
-                        onOpenUserGuide = { showUserGuideScreen = true }
+                        onOpenUserGuide = { showUserGuideScreen = true },
+                        onOpenBackupRestore = { showBackupRestoreDialog = true }
                     )
                 }
             }
@@ -328,6 +362,13 @@ fun TripFinanceApp(viewModel: TripFinanceViewModel) {
     }
 
     // Modal Dialogs
+    if (showBackupRestoreDialog) {
+        BackupRestoreDialog(
+            viewModel = viewModel,
+            onDismiss = { showBackupRestoreDialog = false }
+        )
+    }
+
     if (showExportReportDialog) {
         ExportReportDialog(
             uiState = uiState,
@@ -387,6 +428,14 @@ fun TripFinanceApp(viewModel: TripFinanceViewModel) {
                 )
             }
         }
+    }
+
+    if (aiInsight != null || isLoadingAi) {
+        com.example.ui.components.AiSpendingAdvisorDialog(
+            insight = aiInsight,
+            isLoading = isLoadingAi,
+            onDismiss = { viewModel.clearAiInsight() }
+        )
     }
 }
 

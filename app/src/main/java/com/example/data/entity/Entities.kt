@@ -98,7 +98,7 @@ data class ExpenseEntity(
     val category: String, // FOOD, TRANSPORT, HOTEL, SIGHTSEEING, ENTERTAINMENT, SHOPPING, OTHER
     val payerType: String, // MEMBER, FUND
     val payerMemberId: String?, // null if FUND
-    val totalAmount: Long, // in original currency >= 0
+    val totalAmount: Double, // in original currency >= 0 (supports decimal e.g. 12.50 USD or 500000 VND)
     val currency: String = "VND",
     val exchangeRate: Double = 1.0, // > 0
     val convertedTotalAmount: Long, // totalAmount * exchangeRate >= 0
@@ -112,7 +112,7 @@ data class ExpenseEntity(
 ) {
     init {
         require(title.isNotBlank()) { "Expense title cannot be blank" }
-        require(totalAmount >= 0) { "Total expense amount cannot be negative ($totalAmount)" }
+        require(totalAmount >= 0.0) { "Total expense amount cannot be negative ($totalAmount)" }
         require(exchangeRate > 0.0) { "Exchange rate must be greater than 0 ($exchangeRate)" }
         require(convertedTotalAmount >= 0) { "Converted total amount cannot be negative ($convertedTotalAmount)" }
     }

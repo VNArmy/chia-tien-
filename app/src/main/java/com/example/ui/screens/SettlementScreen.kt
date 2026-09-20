@@ -45,16 +45,19 @@ import java.util.*
 fun SettlementScreen(
     uiState: UiState,
     onFinalizeSettlement: (String) -> Unit,
+    onReopenSettlement: () -> Unit = {},
     onOpenExportReport: () -> Unit
 ) {
     var selectedTransferForQr by remember { mutableStateOf<SettlementTransfer?>(null) }
     var showFinalizeDialog by remember { mutableStateOf(false) }
+    var showReopenDialog by remember { mutableStateOf(false) }
     var selectedSnapshotForView by remember { mutableStateOf<SettlementSnapshotEntity?>(null) }
     val clipboardManager = LocalClipboardManager.current
     var copiedNotice by remember { mutableStateOf<String?>(null) }
 
     val isAdmin = uiState.currentMember?.role == "ADMIN"
     val isBalanced = uiState.financialSummary.isBalanced
+    val isSettled = uiState.currentTrip?.isSettled == true
 
     LazyColumn(
         modifier = Modifier
@@ -120,9 +123,29 @@ fun SettlementScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
-                            Text("Khóa Sổ & Xuất Báo Cáo Đoàn", fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("Khóa Sổ & Xuất Báo Cáo Đoàn", fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                                if (isSettled) {
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Surface(
+                                        shape = RoundedCornerShape(6.dp),
+                                        color = Color(0xFFFEE2E2)
+                                    ) {
+                                        Text(
+                                            text = "ĐÃ KHÓA SỔ",
+                                            fontSize = 9.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color(0xFFB91C1C),
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                }
+                            }
                             Text(
-                                text = "Xuất báo cáo tiếng Việt (Times New Roman / Excel CSV) và lưu snapshot quyết toán",
+                                text = if (isSettled)
+                                    "Chuyến đi đã khóa sổ quyết toán. Dữ liệu chi tiêu & quỹ được niêm phong."
+                                else
+                                    "Xuất báo cáo tiếng Việt (Times New Roman / Excel CSV) và lưu snapshot quyết toán",
                                 fontSize = 11.sp,
                                 color = Color(0xFF64748B)
                             )
@@ -144,28 +167,56 @@ fun SettlementScreen(
                                 Text("Báo cáo", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                             }
 
-                            Button(
-                                onClick = { showFinalizeDialog = true },
-                                enabled = isAdmin && isBalanced,
-                                colors = ButtonDefaults.buttonColors(containerColor = IndigoSecondary),
-                                shape = RoundedCornerShape(10.dp),
-                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                                modifier = Modifier.testTag("finalize_settlement_button")
-                            ) {
-                                Icon(Icons.Filled.Lock, contentDescription = null, modifier = Modifier.size(15.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("Khóa sổ", fontSize = 11.sp)
+                            if (!isSettled) {
+                                Button(
+                                    onClick = { showFinalizeDialog = true },
+                                    enabled = isAdmin && isBalanced,
+                                    colors = ButtonDefaults.buttonColors(containerColor = IndigoSecondary),
+                                    shape = RoundedCornerShape(10.dp),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                    modifier = Modifier.testTag("finalize_settlement_button")
+                                ) {
+                                    Icon(Icons.Filled.Lock, contentDescription = null, modifier = Modifier.size(15.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Khóa sổ", fontSize = 11.sp)
+                                }
+                            } else if (isAdmin) {
+                                OutlinedButton(
+                                    onClick = { showReopenDialog = true },
+                                    shape = RoundedCornerShape(10.dp),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                    modifier = Modifier.testTag("reopen_settlement_button")
+                                ) {
+                                    Icon(Icons.Filled.LockOpen, contentDescription = null, modifier = Modifier.size(15.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Mở khóa", fontSize = 11.sp)
+                                }
                             }
                         }
                     }
 
-                    if (!isAdmin) {
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text("• Chỉ Trưởng đoàn (Admin) mới có quyền khóa sổ chuyến đi", fontSize = 10.sp, color = Color(0xFFEF4444))
-                    }
-                    if (!isBalanced) {
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text("• Tổng số dư đoàn bị lệch. Không thể khóa sổ", fontSize = 10.sp, color = Color(0xFFEF4444))
+                    if (!isSettled) {
+                        if (!isAdmin) {
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text("• Chỉ Trưởng đoàn (Admin) mới có quyền khóa sổ chuyến đi", fontSize = 10.sp, color = Color(0xFFEF4444))
+                        }
+                        if (!isBalanced) {
+                            Spacer(modifier = Modifier.height(4.dp))
+                            val msg = if (uiState.financialSummary.balanceDiscrepancy > 0) {
+                                "• Hệ thống phát hiện chênh lệch đối soát (${NumberFormatUtils.formatVnd(uiState.financialSummary.balanceDiscrepancy)}). Khoản chi phân bổ chưa đủ hoặc có sai lệch dữ liệu. Không thể khóa sổ!"
+                            } else {
+                                "• Tổng số dư đoàn bị lệch hoặc chưa có thành viên. Không thể khóa sổ!"
+                            }
+                            Text(msg, fontSize = 10.sp, color = Color(0xFFEF4444))
+                        }
+                    } else {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            "🔒 Sổ chi tiêu đã được khóa. Người dùng không thể thêm, sửa, xóa các khoản chi và nộp quỹ.",
+                            fontSize = 11.sp,
+                            color = Color(0xFF475569),
+                            fontWeight = FontWeight.Medium
+                        )
                     }
                 }
             }
@@ -252,7 +303,13 @@ fun SettlementScreen(
                         ) {
                             // Debtor
                             Column(modifier = Modifier.weight(1f)) {
-                                Text("Người chuyển (Cần nộp)", fontSize = 10.sp, color = DangerRed)
+                                val isFundSender = transfer.fromMember.id == "FUND_ORGANIZATION"
+                                Text(
+                                    text = if (isFundSender) "Xuất từ Quỹ chung" else "Người chuyển (Cần nộp)",
+                                    fontSize = 10.sp,
+                                    color = if (isFundSender) IndigoSecondary else DangerRed,
+                                    fontWeight = FontWeight.Bold
+                                )
                                 Text(
                                     text = transfer.fromMember.name,
                                     fontSize = 13.sp,
@@ -272,7 +329,13 @@ fun SettlementScreen(
                                 modifier = Modifier.weight(1f),
                                 horizontalAlignment = Alignment.End
                             ) {
-                                Text("Người nhận (Được nhận)", fontSize = 10.sp, color = EmeraldPrimary)
+                                val isFundRecipient = transfer.toMember.id == "FUND_ORGANIZATION"
+                                Text(
+                                    text = if (isFundRecipient) "Nộp bù Quỹ chung" else "Người nhận (Được nhận)",
+                                    fontSize = 10.sp,
+                                    color = EmeraldPrimary,
+                                    fontWeight = FontWeight.Bold
+                                )
                                 Text(
                                     text = transfer.toMember.name,
                                     fontSize = 13.sp,
@@ -483,6 +546,34 @@ fun SettlementScreen(
             },
             dismissButton = {
                 TextButton(onClick = safeDismiss) {
+                    Text("Hủy")
+                }
+            }
+        )
+    }
+
+    // Reopen Settlement Dialog
+    if (showReopenDialog) {
+        AlertDialog(
+            onDismissRequest = { showReopenDialog = false },
+            icon = { Icon(Icons.Filled.LockOpen, contentDescription = null, tint = IndigoSecondary) },
+            title = { Text("Mở Lại Sổ Chuyến Đi", fontWeight = FontWeight.Bold) },
+            text = {
+                Text("Bạn có chắc chắn muốn mở khóa sổ chuyến đi '${uiState.currentTrip?.title}'? Thao tác này sẽ cho phép Trưởng đoàn tiếp tục thêm, sửa, xóa các khoản chi và nộp quỹ.")
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onReopenSettlement()
+                        showReopenDialog = false
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = IndigoSecondary)
+                ) {
+                    Text("Mở khóa sổ")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showReopenDialog = false }) {
                     Text("Hủy")
                 }
             }

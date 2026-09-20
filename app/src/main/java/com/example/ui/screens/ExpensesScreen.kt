@@ -1,5 +1,6 @@
 package com.example.ui.screens
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -49,7 +50,7 @@ fun ExpensesScreen(
         category: String,
         payerType: String,
         payerMemberId: String?,
-        totalAmount: Long,
+        totalAmount: Double,
         currency: String,
         exchangeRate: Double,
         splitType: String,
@@ -68,19 +69,22 @@ fun ExpensesScreen(
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
     val isAdmin = uiState.currentMember?.role == "ADMIN"
+    val isSettled = uiState.currentTrip?.isSettled == true
 
     Scaffold(
         floatingActionButton = {
-            FloatingActionButton(
-                onClick = onOpenAddExpense,
-                containerColor = EmeraldPrimary,
-                contentColor = Color.White,
-                shape = CircleShape,
-                modifier = Modifier
-                    .padding(bottom = 72.dp)
-                    .testTag("fab_add_expense")
-            ) {
-                Icon(Icons.Filled.Add, contentDescription = "Thêm khoản chi")
+            if (!isSettled) {
+                FloatingActionButton(
+                    onClick = onOpenAddExpense,
+                    containerColor = EmeraldPrimary,
+                    contentColor = Color.White,
+                    shape = CircleShape,
+                    modifier = Modifier
+                        .padding(bottom = 72.dp)
+                        .testTag("fab_add_expense")
+                ) {
+                    Icon(Icons.Filled.Add, contentDescription = "Thêm khoản chi")
+                }
             }
         }
     ) { padding ->
@@ -91,6 +95,29 @@ fun ExpensesScreen(
                 .padding(horizontal = 16.dp)
         ) {
             Spacer(modifier = Modifier.height(12.dp))
+
+            if (isSettled) {
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = Color(0xFFF1F5F9),
+                    border = BorderStroke(1.dp, Color(0xFFCBD5E1)),
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(Icons.Filled.Lock, contentDescription = null, tint = Color(0xFF64748B), modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Chuyến đi đã khóa sổ quyết toán. Dữ liệu chi tiêu được bảo vệ và không thể thêm/sửa/xóa.",
+                            fontSize = 11.sp,
+                            color = Color(0xFF475569),
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
+            }
 
             // Search Bar
             OutlinedTextField(
@@ -192,6 +219,7 @@ fun ExpensesScreen(
                             expense = expense,
                             members = uiState.members,
                             isAdmin = isAdmin,
+                            isSettled = isSettled,
                             onClick = { selectedExpenseForDetail = expense },
                             onEdit = { expenseToEdit = expense },
                             onDelete = { expenseToDelete = expense }
@@ -210,6 +238,7 @@ fun ExpensesScreen(
             members = uiState.members,
             splits = splitsForExp,
             isAdmin = isAdmin,
+            isSettled = isSettled,
             onDismiss = { selectedExpenseForDetail = null },
             onEdit = {
                 selectedExpenseForDetail = null
@@ -280,6 +309,7 @@ fun ExpenseItemCard(
     expense: ExpenseEntity,
     members: List<TripMemberEntity>,
     isAdmin: Boolean,
+    isSettled: Boolean = false,
     onClick: () -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit
@@ -381,7 +411,7 @@ fun ExpenseItemCard(
                     )
                 }
 
-                if (isAdmin) {
+                if (isAdmin && !isSettled) {
                     Row(
                         horizontalArrangement = Arrangement.spacedBy(2.dp),
                         verticalAlignment = Alignment.CenterVertically
@@ -421,6 +451,7 @@ fun ExpenseDetailDialog(
     members: List<TripMemberEntity>,
     splits: List<ExpenseSplitEntity> = emptyList(),
     isAdmin: Boolean = false,
+    isSettled: Boolean = false,
     onDismiss: () -> Unit,
     onEdit: () -> Unit = {},
     onDelete: () -> Unit = {}
@@ -583,7 +614,16 @@ fun ExpenseDetailDialog(
                     }
                 }
 
-                if (!isAdmin) {
+                if (isSettled) {
+                    item {
+                        Text(
+                            text = "🔒 Chuyến đi đã khóa sổ. Dữ liệu chi tiêu được niêm phong, không thể sửa hoặc xóa.",
+                            fontSize = 11.sp,
+                            color = Color(0xFFB91C1C),
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                } else if (!isAdmin) {
                     item {
                         Text(
                             text = "ℹ️ Chỉ Trưởng đoàn (Admin) mới có quyền sửa hoặc xóa khoản chi này.",
@@ -596,7 +636,7 @@ fun ExpenseDetailDialog(
         },
         confirmButton = {
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                if (isAdmin) {
+                if (isAdmin && !isSettled) {
                     OutlinedButton(
                         onClick = onEdit,
                         colors = ButtonDefaults.outlinedButtonColors(contentColor = IndigoSecondary)

@@ -1,11 +1,20 @@
 package com.example.data.repository
 
+import android.content.Context
+import android.net.Uri
+import androidx.room.withTransaction
+import org.json.JSONObject
+import com.example.data.backup.BackupData
+import com.example.data.backup.BackupMetadata
+import com.example.data.backup.BackupRestoreManager
+import com.example.data.backup.RestoreResult
 import com.example.data.db.AppDatabase
 import com.example.data.entity.*
 import com.example.domain.engine.SettlementEngine
 import com.example.domain.model.*
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
+import java.io.File
 import java.util.UUID
 
 class TripFinanceRepository(private val db: AppDatabase) {
@@ -38,40 +47,44 @@ class TripFinanceRepository(private val db: AppDatabase) {
             isSettled = false,
             createdAt = System.currentTimeMillis()
         )
-        db.tripDao().insertTrip(trip)
+        db.withTransaction {
+            db.tripDao().insertTrip(trip)
 
-        // Add creator as Admin
-        val adminMember = TripMemberEntity(
-            id = UUID.randomUUID().toString(),
-            tripId = tripId,
-            userId = "user_" + UUID.randomUUID().toString().take(6),
-            name = adminName,
-            role = "ADMIN",
-            isActive = true,
-            bankName = adminBankName,
-            bankAccount = adminBankAccount,
-            bankAccountHolder = adminBankHolder,
-            joinedAt = System.currentTimeMillis()
-        )
-        db.tripMemberDao().insertMember(adminMember)
+            // Add creator as Admin
+            val adminMember = TripMemberEntity(
+                id = UUID.randomUUID().toString(),
+                tripId = tripId,
+                userId = "user_" + UUID.randomUUID().toString().take(6),
+                name = adminName,
+                role = "ADMIN",
+                isActive = true,
+                bankName = adminBankName,
+                bankAccount = adminBankAccount,
+                bankAccountHolder = adminBankHolder,
+                joinedAt = System.currentTimeMillis()
+            )
+            db.tripMemberDao().insertMember(adminMember)
 
-        // Seed default exchange rates
-        val rates = listOf(
-            ExchangeRateEntity(UUID.randomUUID().toString(), tripId, "USD", 25450.0),
-            ExchangeRateEntity(UUID.randomUUID().toString(), tripId, "EUR", 27600.0),
-            ExchangeRateEntity(UUID.randomUUID().toString(), tripId, "JPY", 168.0),
-            ExchangeRateEntity(UUID.randomUUID().toString(), tripId, "THB", 720.0),
-            ExchangeRateEntity(UUID.randomUUID().toString(), tripId, "SGD", 19200.0)
-        )
-        db.exchangeRateDao().insertExchangeRates(rates)
+            // Seed default exchange rates from centralized DefaultExchangeRates
+            val rates = listOf(
+                ExchangeRateEntity(UUID.randomUUID().toString(), tripId, "USD", DefaultExchangeRates.RATE_USD),
+                ExchangeRateEntity(UUID.randomUUID().toString(), tripId, "EUR", DefaultExchangeRates.RATE_EUR),
+                ExchangeRateEntity(UUID.randomUUID().toString(), tripId, "JPY", DefaultExchangeRates.RATE_JPY),
+                ExchangeRateEntity(UUID.randomUUID().toString(), tripId, "KRW", DefaultExchangeRates.RATE_KRW),
+                ExchangeRateEntity(UUID.randomUUID().toString(), tripId, "THB", DefaultExchangeRates.RATE_THB),
+                ExchangeRateEntity(UUID.randomUUID().toString(), tripId, "SGD", DefaultExchangeRates.RATE_SGD),
+                ExchangeRateEntity(UUID.randomUUID().toString(), tripId, "CNY", DefaultExchangeRates.RATE_CNY)
+            )
+            db.exchangeRateDao().insertExchangeRates(rates)
 
-        logAction(
-            tripId = tripId,
-            actorMemberId = adminMember.id,
-            actorName = adminName,
-            action = "CREATE_TRIP",
-            description = "Tạo mới đoàn '$title' (Mã: $joinCode)"
-        )
+            logAction(
+                tripId = tripId,
+                actorMemberId = adminMember.id,
+                actorName = adminName,
+                action = "CREATE_TRIP",
+                description = "Tạo mới đoàn '$title' (Mã: $joinCode)"
+            )
+        }
 
         return tripId
     }
@@ -126,15 +139,17 @@ class TripFinanceRepository(private val db: AppDatabase) {
     }
 
     suspend fun deleteTripCascade(tripId: String) {
-        // Cascade delete related records
-        db.expenseDao().deleteSplitsByTrip(tripId)
-        db.expenseDao().deleteExpensesByTrip(tripId)
-        db.fundDao().deleteFundsByTrip(tripId)
-        db.exchangeRateDao().deleteExchangeRatesByTrip(tripId)
-        db.settlementDao().deleteSnapshotsByTrip(tripId)
-        db.auditLogDao().deleteAuditLogsByTrip(tripId)
-        db.tripMemberDao().deleteMembersByTrip(tripId)
-        db.tripDao().deleteTripById(tripId)
+        db.withTransaction {
+            // Cascade delete related records atomically
+            db.expenseDao().deleteSplitsByTrip(tripId)
+            db.expenseDao().deleteExpensesByTrip(tripId)
+            db.fundDao().deleteFundsByTrip(tripId)
+            db.exchangeRateDao().deleteExchangeRatesByTrip(tripId)
+            db.settlementDao().deleteSnapshotsByTrip(tripId)
+            db.auditLogDao().deleteAuditLogsByTrip(tripId)
+            db.tripMemberDao().deleteMembersByTrip(tripId)
+            db.tripDao().deleteTripById(tripId)
+        }
     }
 
     // Members
@@ -150,6 +165,10 @@ class TripFinanceRepository(private val db: AppDatabase) {
         bankAccountHolder: String?,
         actor: TripMemberEntity
     ): String {
+        val trip = db.tripDao().getTripByIdOnce(tripId)
+        if (trip?.isSettled == true) {
+            throw IllegalStateException("Chuyến đi '${trip.title}' đã được khóa sổ quyết toán. Không thể thêm thành viên mới!")
+        }
         val memberId = UUID.randomUUID().toString()
         val member = TripMemberEntity(
             id = memberId,
@@ -175,6 +194,10 @@ class TripFinanceRepository(private val db: AppDatabase) {
     }
 
     suspend fun updateMember(member: TripMemberEntity, actor: TripMemberEntity) {
+        val trip = db.tripDao().getTripByIdOnce(member.tripId)
+        if (trip?.isSettled == true && actor.role != "ADMIN") {
+            throw IllegalStateException("Chuyến đi đã khóa sổ. Không thể sửa thông tin thành viên!")
+        }
         db.tripMemberDao().updateMember(member)
         logAction(
             tripId = member.tripId,
@@ -186,6 +209,10 @@ class TripFinanceRepository(private val db: AppDatabase) {
     }
 
     suspend fun removeOrDeactivateMember(member: TripMemberEntity, actor: TripMemberEntity) {
+        val trip = db.tripDao().getTripByIdOnce(member.tripId)
+        if (trip?.isSettled == true) {
+            throw IllegalStateException("Chuyến đi '${trip.title}' đã được khóa sổ quyết toán. Không thể xóa hoặc ngừng hoạt động thành viên!")
+        }
         val paidExpenseCount = db.expenseDao().countExpensesByPayer(member.id)
         val createdExpenseCount = db.expenseDao().countExpensesCreatedByMember(member.id)
         val splitCount = db.expenseDao().countSplitsByMember(member.id)
@@ -235,16 +262,38 @@ class TripFinanceRepository(private val db: AppDatabase) {
         splits: List<ExpenseSplitEntity>,
         actor: TripMemberEntity
     ) {
-        db.expenseDao().insertExpense(expense)
-        db.expenseDao().insertSplits(splits)
-        val payerDesc = if (expense.payerType == "FUND") "Quỹ đoàn" else (actor.name)
-        logAction(
-            tripId = expense.tripId,
-            actorMemberId = actor.id,
-            actorName = actor.name,
-            action = "CREATE_EXPENSE",
-            description = "Tạo chi tiêu '${expense.title}': ${expense.convertedTotalAmount} VND (Người trả: $payerDesc)"
-        )
+        val trip = db.tripDao().getTripByIdOnce(expense.tripId)
+        if (trip?.isSettled == true) {
+            throw IllegalStateException("Chuyến đi '${trip.title}' đã được khóa sổ quyết toán. Không thể thêm khoản chi mới!")
+        }
+        db.withTransaction {
+            db.expenseDao().insertExpenseWithSplits(expense, splits)
+            val payerDesc = if (expense.payerType == "FUND") "Quỹ đoàn" else (actor.name)
+            val afterJson = JSONObject().apply {
+                put("title", expense.title)
+                put("category", expense.category)
+                put("payerType", expense.payerType)
+                put("payerMemberId", expense.payerMemberId ?: "")
+                put("totalAmount", expense.totalAmount)
+                put("currency", expense.currency)
+                put("exchangeRate", expense.exchangeRate)
+                put("convertedTotalAmount", expense.convertedTotalAmount)
+                put("splitType", expense.splitType)
+                put("note", expense.note)
+                put("createdMemberId", expense.createdMemberId)
+                put("splitCount", splits.size)
+            }.toString()
+
+            logAction(
+                tripId = expense.tripId,
+                actorMemberId = actor.id,
+                actorName = actor.name,
+                action = "CREATE_EXPENSE",
+                description = "Tạo chi tiêu '${expense.title}': ${expense.convertedTotalAmount} VND (Người trả: $payerDesc)",
+                before = null,
+                after = afterJson
+            )
+        }
     }
 
     suspend fun updateExpenseWithSplits(
@@ -252,28 +301,95 @@ class TripFinanceRepository(private val db: AppDatabase) {
         splits: List<ExpenseSplitEntity>,
         actor: TripMemberEntity
     ) {
-        db.expenseDao().updateExpense(expense)
-        db.expenseDao().deleteSplitsByExpense(expense.id)
-        db.expenseDao().insertSplits(splits)
-        logAction(
-            tripId = expense.tripId,
-            actorMemberId = actor.id,
-            actorName = actor.name,
-            action = "UPDATE_EXPENSE",
-            description = "Cập nhật chi tiêu '${expense.title}': ${expense.convertedTotalAmount} VND"
-        )
+        val trip = db.tripDao().getTripByIdOnce(expense.tripId)
+        if (trip?.isSettled == true) {
+            throw IllegalStateException("Chuyến đi '${trip.title}' đã được khóa sổ quyết toán. Không thể chỉnh sửa khoản chi!")
+        }
+        db.withTransaction {
+            val existingExpense = db.expenseDao().getExpenseById(expense.id)
+            val existingSplits = db.expenseDao().getSplitsByExpenseOnce(expense.id)
+
+            // CRITICAL FIX: Luôn bảo lưu người tạo ban đầu (createdMemberId), không để người sửa ghi đè
+            val preservedCreatedMemberId = existingExpense?.createdMemberId ?: expense.createdMemberId
+            val finalExpense = expense.copy(createdMemberId = preservedCreatedMemberId)
+
+            val beforeJson = if (existingExpense != null) {
+                JSONObject().apply {
+                    put("title", existingExpense.title)
+                    put("category", existingExpense.category)
+                    put("payerType", existingExpense.payerType)
+                    put("payerMemberId", existingExpense.payerMemberId ?: "")
+                    put("totalAmount", existingExpense.totalAmount)
+                    put("currency", existingExpense.currency)
+                    put("exchangeRate", existingExpense.exchangeRate)
+                    put("convertedTotalAmount", existingExpense.convertedTotalAmount)
+                    put("splitType", existingExpense.splitType)
+                    put("note", existingExpense.note)
+                    put("createdMemberId", existingExpense.createdMemberId)
+                    put("splitCount", existingSplits.size)
+                }.toString()
+            } else null
+
+            val afterJson = JSONObject().apply {
+                put("title", finalExpense.title)
+                put("category", finalExpense.category)
+                put("payerType", finalExpense.payerType)
+                put("payerMemberId", finalExpense.payerMemberId ?: "")
+                put("totalAmount", finalExpense.totalAmount)
+                put("currency", finalExpense.currency)
+                put("exchangeRate", finalExpense.exchangeRate)
+                put("convertedTotalAmount", finalExpense.convertedTotalAmount)
+                put("splitType", finalExpense.splitType)
+                put("note", finalExpense.note)
+                put("createdMemberId", finalExpense.createdMemberId)
+                put("splitCount", splits.size)
+            }.toString()
+
+            db.expenseDao().updateExpenseWithSplits(finalExpense, splits)
+
+            logAction(
+                tripId = finalExpense.tripId,
+                actorMemberId = actor.id,
+                actorName = actor.name,
+                action = "UPDATE_EXPENSE",
+                description = "Cập nhật chi tiêu '${finalExpense.title}': ${finalExpense.convertedTotalAmount} VND",
+                before = beforeJson,
+                after = afterJson
+            )
+        }
     }
 
     suspend fun deleteExpense(expense: ExpenseEntity, actor: TripMemberEntity) {
-        db.expenseDao().deleteExpenseById(expense.id)
-        db.expenseDao().deleteSplitsByExpense(expense.id)
-        logAction(
-            tripId = expense.tripId,
-            actorMemberId = actor.id,
-            actorName = actor.name,
-            action = "DELETE_EXPENSE",
-            description = "Xóa chi tiêu '${expense.title}' (${expense.convertedTotalAmount} VND)"
-        )
+        val trip = db.tripDao().getTripByIdOnce(expense.tripId)
+        if (trip?.isSettled == true) {
+            throw IllegalStateException("Chuyến đi '${trip.title}' đã được khóa sổ quyết toán. Không thể xóa khoản chi!")
+        }
+        db.withTransaction {
+            val beforeJson = JSONObject().apply {
+                put("title", expense.title)
+                put("category", expense.category)
+                put("payerType", expense.payerType)
+                put("payerMemberId", expense.payerMemberId ?: "")
+                put("totalAmount", expense.totalAmount)
+                put("currency", expense.currency)
+                put("exchangeRate", expense.exchangeRate)
+                put("convertedTotalAmount", expense.convertedTotalAmount)
+                put("splitType", expense.splitType)
+                put("createdMemberId", expense.createdMemberId)
+            }.toString()
+
+            db.expenseDao().deleteExpenseWithSplits(expense.id)
+
+            logAction(
+                tripId = expense.tripId,
+                actorMemberId = actor.id,
+                actorName = actor.name,
+                action = "DELETE_EXPENSE",
+                description = "Xóa chi tiêu '${expense.title}' (${expense.convertedTotalAmount} VND)",
+                before = beforeJson,
+                after = null
+            )
+        }
     }
 
     // Funds
@@ -285,6 +401,10 @@ class TripFinanceRepository(private val db: AppDatabase) {
         contributorName: String,
         actor: TripMemberEntity
     ) {
+        val trip = db.tripDao().getTripByIdOnce(contribution.tripId)
+        if (trip?.isSettled == true) {
+            throw IllegalStateException("Chuyến đi '${trip.title}' đã được khóa sổ quyết toán. Không thể nộp thêm quỹ!")
+        }
         db.fundDao().insertFundContribution(contribution)
         logAction(
             tripId = contribution.tripId,
@@ -295,11 +415,34 @@ class TripFinanceRepository(private val db: AppDatabase) {
         )
     }
 
+    suspend fun deleteFundContribution(
+        contribution: FundContributionEntity,
+        contributorName: String,
+        actor: TripMemberEntity
+    ) {
+        val trip = db.tripDao().getTripByIdOnce(contribution.tripId)
+        if (trip?.isSettled == true) {
+            throw IllegalStateException("Chuyến đi '${trip.title}' đã được khóa sổ quyết toán. Không thể xóa khoản nộp quỹ!")
+        }
+        db.fundDao().deleteFundContribution(contribution.id)
+        logAction(
+            tripId = contribution.tripId,
+            actorMemberId = actor.id,
+            actorName = actor.name,
+            action = "DELETE_FUND",
+            description = "Xóa khoản nộp quỹ của $contributorName (${contribution.convertedAmount} VND)"
+        )
+    }
+
     // Exchange Rates
     fun getExchangeRates(tripId: String): Flow<List<ExchangeRateEntity>> =
         db.exchangeRateDao().getExchangeRates(tripId)
 
     suspend fun updateExchangeRate(rate: ExchangeRateEntity, actor: TripMemberEntity) {
+        val trip = db.tripDao().getTripByIdOnce(rate.tripId)
+        if (trip?.isSettled == true) {
+            throw IllegalStateException("Chuyến đi '${trip.title}' đã được khóa sổ quyết toán. Không thể thay đổi tỷ giá!")
+        }
         db.exchangeRateDao().insertExchangeRate(rate)
         logAction(
             tripId = rate.tripId,
@@ -341,6 +484,20 @@ class TripFinanceRepository(private val db: AppDatabase) {
             actorName = actor.name,
             action = "SETTLE_TRIP",
             description = "Khóa sổ và quyết toán chuyến đi. Snapshot: $snapshotTitle"
+        )
+    }
+
+    suspend fun reopenSettlement(trip: TripEntity, actor: TripMemberEntity) {
+        if (actor.role != "ADMIN") {
+            throw IllegalStateException("Chỉ Trưởng đoàn (Admin) mới có quyền mở khóa sổ chuyến đi!")
+        }
+        db.tripDao().updateTrip(trip.copy(isSettled = false, settledAt = null))
+        logAction(
+            tripId = trip.id,
+            actorMemberId = actor.id,
+            actorName = actor.name,
+            action = "REOPEN_SETTLEMENT",
+            description = "Trưởng đoàn ${actor.name} đã mở khóa sổ chuyến đi '${trip.title}' để tiếp tục cập nhật dữ liệu"
         )
     }
 
@@ -435,10 +592,36 @@ class TripFinanceRepository(private val db: AppDatabase) {
                 )
             }
 
-            // Đối soát liên tục: Tổng Balance của toàn bộ thành viên đoàn
-            // Chú ý: Quỹ đoàn còn dư (nếu có) phản ánh phần tiền chưa chi tiêu trong số tiền đã nộp
-            val totalBalance = memberStatuses.sumOf { it.balance }
-            val isBalanced = kotlin.math.abs(totalBalance - remainingFund) == 0L || kotlin.math.abs(totalBalance) == 0L
+            val memberIds = members.map { it.id }.toSet()
+
+            // ĐỐI SOÁT TÀI CHÍNH KẾ TOÁN (Reconciliation):
+            // 1. Phân bổ chi phí: Mỗi khoản chi phải có tổng số tiền phân bổ trong splits đúng bằng số tiền của khoản chi
+            val splitsByExpense = splits.groupBy { it.expenseId }
+            val splitDiscrepancy = expenses.sumOf { exp ->
+                val expSplits = splitsByExpense[exp.id] ?: emptyList()
+                kotlin.math.abs(exp.convertedTotalAmount - expSplits.sumOf { it.amount })
+            }
+
+            // 2. Kiểm tra người chi cá nhân: Khoản chi cá nhân phải có người chi thuộc danh sách thành viên đoàn
+            val unassignedPayerAmount = expenses
+                .filter { it.payerType == "MEMBER" && (it.payerMemberId == null || !memberIds.contains(it.payerMemberId)) }
+                .sumOf { it.convertedTotalAmount }
+
+            // 3. Kiểm tra người nộp quỹ: Khoản nộp quỹ phải có người nộp thuộc danh sách thành viên đoàn
+            val unassignedFundAmount = fundContributions
+                .filter { !memberIds.contains(it.memberId) }
+                .sumOf { it.convertedAmount }
+
+            // 4. Kiểm tra phân bổ mồ côi: Split không được gán cho người không thuộc đoàn
+            val orphanSplitAmount = splits
+                .filter { !memberIds.contains(it.memberId) }
+                .sumOf { it.amount }
+
+            // Tổng chênh lệch đối soát thực tế:
+            // Sổ sách chỉ được coi là cân bằng khi mọi khoản chi được phân bổ chính xác 100%
+            // và mọi dòng tiền thu/chi đều có thành viên hợp lệ chịu trách nhiệm
+            val discrepancy = splitDiscrepancy + unassignedPayerAmount + unassignedFundAmount + orphanSplitAmount
+            val isBalanced = members.isNotEmpty() && discrepancy <= 5L
 
             val summary = FinancialSummary(
                 totalExpenses = totalExpenseSum,
@@ -447,12 +630,57 @@ class TripFinanceRepository(private val db: AppDatabase) {
                 totalFundCollected = totalFundCollected,
                 remainingFund = remainingFund,
                 isBalanced = isBalanced,
-                balanceDiscrepancy = totalBalance,
+                balanceDiscrepancy = discrepancy,
                 memberCount = members.size,
                 expenseCount = expenses.size
             )
 
             summary to memberStatuses
         }
+    }
+
+    // ==========================================
+    // BACKUP & RESTORE REPOSITORY OPERATIONS
+    // ==========================================
+
+    suspend fun createLocalBackup(context: Context): File {
+        return BackupRestoreManager.createLocalBackupFile(context, db)
+    }
+
+    suspend fun exportBackupToUri(context: Context, uri: Uri): Result<Unit> {
+        return BackupRestoreManager.writeBackupToUri(context, uri, db)
+    }
+
+    suspend fun restoreBackupFromUri(context: Context, uri: Uri, clearExisting: Boolean = false): Result<RestoreResult> {
+        val readResult = BackupRestoreManager.readBackupFromUri(context, uri)
+        if (readResult.isFailure) {
+            return Result.failure(readResult.exceptionOrNull() ?: Exception("Không thể đọc tệp sao lưu"))
+        }
+        val parseResult = BackupRestoreManager.parseAndValidateBackup(readResult.getOrThrow())
+        if (parseResult.isFailure) {
+            return Result.failure(parseResult.exceptionOrNull() ?: Exception("Dữ liệu sao lưu không hợp lệ"))
+        }
+        return BackupRestoreManager.restoreFromBackupData(db, parseResult.getOrThrow(), clearExisting)
+    }
+
+    suspend fun restoreBackupFromFile(file: File, clearExisting: Boolean = false): Result<RestoreResult> {
+        return try {
+            val json = file.readText(Charsets.UTF_8)
+            val parseResult = BackupRestoreManager.parseAndValidateBackup(json)
+            if (parseResult.isFailure) {
+                return Result.failure(parseResult.exceptionOrNull() ?: Exception("Dữ liệu sao lưu không hợp lệ"))
+            }
+            BackupRestoreManager.restoreFromBackupData(db, parseResult.getOrThrow(), clearExisting)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    fun listLocalBackups(context: Context): List<File> {
+        return BackupRestoreManager.listLocalBackups(context)
+    }
+
+    fun shareBackupFile(context: Context, file: File) {
+        BackupRestoreManager.shareBackupFile(context, file)
     }
 }

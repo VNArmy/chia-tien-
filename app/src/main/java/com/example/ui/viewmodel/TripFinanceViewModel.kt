@@ -14,6 +14,8 @@ import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import java.util.UUID
 import android.content.Context
+import android.net.Uri
+import java.io.File
 
 data class UiState(
     val currentTrip: TripEntity? = null,
@@ -42,12 +44,16 @@ class TripFinanceViewModel(application: Application) : AndroidViewModel(applicat
     private val repository: TripFinanceRepository
     private val sharedPrefs = application.getSharedPreferences("trip_finance_prefs", Context.MODE_PRIVATE)
 
-    private val _currentTripId = MutableStateFlow<String?>("trip_danang_2026")
-    private val _currentMemberId = MutableStateFlow<String?>("member_1")
+    private val _currentTripId = MutableStateFlow<String?>(null)
+    private val _currentMemberId = MutableStateFlow<String?>(null)
     private val _selectedCategoryFilter = MutableStateFlow<String?>(null)
     private val _searchQuery = MutableStateFlow("")
     private val _errorMessage = MutableStateFlow<String?>(null)
     private val _successMessage = MutableStateFlow<String?>(null)
+    private val _aiInsight = MutableStateFlow<String?>(null)
+    private val _isLoadingAi = MutableStateFlow(false)
+    val aiInsight: StateFlow<String?> = _aiInsight.asStateFlow()
+    val isLoadingAi: StateFlow<Boolean> = _isLoadingAi.asStateFlow()
     private val _language = MutableStateFlow(
         if (sharedPrefs.getString("app_language", "vi") == "en") AppLanguage.EN else AppLanguage.VI
     )
@@ -172,9 +178,15 @@ class TripFinanceViewModel(application: Application) : AndroidViewModel(applicat
                         )
                     }.sortedByDescending { it.totalAmount }
 
+                    val fundHolder = core.members.find { it.role == "TREASURER" && it.isActive }
+                        ?: core.members.find { it.role == "ADMIN" && it.isActive }
+                        ?: core.members.firstOrNull()
+
                     val transfers = SettlementEngine.computeSimplifiedTransfers(
                         memberStatuses = statuses,
-                        tripJoinCode = currentTrip.joinCode
+                        tripJoinCode = currentTrip.joinCode,
+                        remainingFund = summary.remainingFund,
+                        fundHolder = fundHolder
                     )
 
                     val filteredExpenses = core.expenses.filter { exp ->
@@ -252,6 +264,32 @@ class TripFinanceViewModel(application: Application) : AndroidViewModel(applicat
 
     fun showSuccess(msg: String) {
         _successMessage.value = msg
+    }
+
+    fun requestAiSpendingInsight() {
+        val state = uiState.value
+        val currentTrip = state.currentTrip ?: return
+        viewModelScope.launch {
+            _isLoadingAi.value = true
+            try {
+                val insight = com.example.domain.ai.GeminiSpendingAdvisor.analyzeTripFinances(
+                    tripTitle = currentTrip.title,
+                    financialSummary = state.financialSummary,
+                    categories = state.categoryBreakdowns,
+                    members = state.memberStatuses,
+                    languageCode = state.language.code
+                )
+                _aiInsight.value = insight
+            } catch (e: Exception) {
+                _aiInsight.value = "Lỗi khi gọi AI cố vấn: ${e.message}"
+            } finally {
+                _isLoadingAi.value = false
+            }
+        }
+    }
+
+    fun clearAiInsight() {
+        _aiInsight.value = null
     }
 
     // Trip operations
@@ -346,7 +384,7 @@ class TripFinanceViewModel(application: Application) : AndroidViewModel(applicat
         category: String,
         payerType: String,
         payerMemberId: String?,
-        totalAmount: Long,
+        totalAmount: Double,
         currency: String,
         exchangeRate: Double,
         splitType: String,
@@ -357,44 +395,54 @@ class TripFinanceViewModel(application: Application) : AndroidViewModel(applicat
         val currentTrip = uiState.value.currentTrip ?: return
         val currentMember = uiState.value.currentMember ?: return
 
-        val convertedTotal = (totalAmount.toDouble() * exchangeRate).toLong()
+        if (currentTrip.isSettled) {
+            showError("Chuyến đi '${currentTrip.title}' đã được khóa sổ quyết toán. Không thể thêm khoản chi mới!")
+            return
+        }
+
+        val convertedTotal = kotlin.math.round(totalAmount * exchangeRate).toLong()
         val totalSplitSum = splits.sumOf { it.second }
         if (totalSplitSum != convertedTotal) {
             showError("Tổng tiền phân bổ ($totalSplitSum VND) không bằng tổng khoản chi ($convertedTotal VND). Vui lòng kiểm tra lại!")
             return
         }
 
-        val expenseId = UUID.randomUUID().toString()
-        val expense = ExpenseEntity(
-            id = expenseId,
-            tripId = currentTrip.id,
-            title = title,
-            category = category,
-            payerType = payerType,
-            payerMemberId = if (payerType == "MEMBER") payerMemberId else null,
-            totalAmount = totalAmount,
-            currency = currency,
-            exchangeRate = exchangeRate,
-            convertedTotalAmount = convertedTotal,
-            splitType = splitType,
-            note = note,
-            timestamp = timestamp,
-            createdMemberId = currentMember.id,
-            isSynced = true
-        )
-
-        val splitEntities = splits.map { (memberId, amount) ->
-            ExpenseSplitEntity(
-                id = UUID.randomUUID().toString(),
-                expenseId = expenseId,
-                tripId = currentTrip.id,
-                memberId = memberId,
-                amount = amount
-            )
+        if (splits.any { it.second < 0 }) {
+            showError("Số tiền phân bổ không được âm. Vui lòng kiểm tra lại tỷ lệ chia!")
+            return
         }
 
         viewModelScope.launch {
             try {
+                val expenseId = UUID.randomUUID().toString()
+                val expense = ExpenseEntity(
+                    id = expenseId,
+                    tripId = currentTrip.id,
+                    title = title,
+                    category = category,
+                    payerType = payerType,
+                    payerMemberId = if (payerType == "MEMBER") payerMemberId else null,
+                    totalAmount = totalAmount,
+                    currency = currency,
+                    exchangeRate = exchangeRate,
+                    convertedTotalAmount = convertedTotal,
+                    splitType = splitType,
+                    note = note,
+                    timestamp = timestamp,
+                    createdMemberId = currentMember.id,
+                    isSynced = true
+                )
+
+                val splitEntities = splits.map { (memberId, amount) ->
+                    ExpenseSplitEntity(
+                        id = UUID.randomUUID().toString(),
+                        expenseId = expenseId,
+                        tripId = currentTrip.id,
+                        memberId = memberId,
+                        amount = amount
+                    )
+                }
+
                 repository.addExpenseWithSplits(expense, splitEntities, currentMember)
                 showSuccess("Đã thêm khoản chi '$title' thành công!")
             } catch (e: Exception) {
@@ -409,7 +457,7 @@ class TripFinanceViewModel(application: Application) : AndroidViewModel(applicat
         category: String,
         payerType: String,
         payerMemberId: String?,
-        totalAmount: Long,
+        totalAmount: Double,
         currency: String,
         exchangeRate: Double,
         splitType: String,
@@ -420,49 +468,63 @@ class TripFinanceViewModel(application: Application) : AndroidViewModel(applicat
         val currentTrip = uiState.value.currentTrip ?: return
         val currentMember = uiState.value.currentMember ?: return
 
+        if (currentTrip.isSettled) {
+            showError("Chuyến đi '${currentTrip.title}' đã được khóa sổ quyết toán. Không thể chỉnh sửa khoản chi!")
+            return
+        }
+
         // Strict RBAC: Only Admin can edit expenses
         if (currentMember.role != "ADMIN") {
             showError("Chỉ Trưởng đoàn (Admin) mới có quyền chỉnh sửa các khoản chi!")
             return
         }
 
-        val convertedTotal = (totalAmount.toDouble() * exchangeRate).toLong()
+        val convertedTotal = kotlin.math.round(totalAmount * exchangeRate).toLong()
         val totalSplitSum = splits.sumOf { it.second }
         if (totalSplitSum != convertedTotal) {
             showError("Tổng tiền phân bổ ($totalSplitSum VND) không bằng tổng khoản chi ($convertedTotal VND). Vui lòng kiểm tra lại!")
             return
         }
 
-        val updatedExpense = ExpenseEntity(
-            id = expenseId,
-            tripId = currentTrip.id,
-            title = title,
-            category = category,
-            payerType = payerType,
-            payerMemberId = if (payerType == "MEMBER") payerMemberId else null,
-            totalAmount = totalAmount,
-            currency = currency,
-            exchangeRate = exchangeRate,
-            convertedTotalAmount = convertedTotal,
-            splitType = splitType,
-            note = note,
-            timestamp = timestamp,
-            createdMemberId = currentMember.id,
-            isSynced = true
-        )
-
-        val splitEntities = splits.map { (memberId, amount) ->
-            ExpenseSplitEntity(
-                id = UUID.randomUUID().toString(),
-                expenseId = expenseId,
-                tripId = currentTrip.id,
-                memberId = memberId,
-                amount = amount
-            )
+        if (splits.any { it.second < 0 }) {
+            showError("Số tiền phân bổ không được âm. Vui lòng kiểm tra lại tỷ lệ chia!")
+            return
         }
+
+        // CRITICAL FIX: Bảo lưu người tạo ban đầu (createdMemberId), không ghi đè bằng id của người sửa
+        val existingExpense = uiState.value.expenses.find { it.id == expenseId }
+        val preservedCreatedMemberId = existingExpense?.createdMemberId ?: currentMember.id
 
         viewModelScope.launch {
             try {
+                val updatedExpense = ExpenseEntity(
+                    id = expenseId,
+                    tripId = currentTrip.id,
+                    title = title,
+                    category = category,
+                    payerType = payerType,
+                    payerMemberId = if (payerType == "MEMBER") payerMemberId else null,
+                    totalAmount = totalAmount,
+                    currency = currency,
+                    exchangeRate = exchangeRate,
+                    convertedTotalAmount = convertedTotal,
+                    splitType = splitType,
+                    note = note,
+                    timestamp = timestamp,
+                    createdMemberId = preservedCreatedMemberId,
+                    isSynced = true
+                )
+
+                val splitEntities = splits.map { (memberId, amount) ->
+                    ExpenseSplitEntity(
+                        id = UUID.randomUUID().toString(),
+                        expenseId = expenseId,
+                        tripId = currentTrip.id,
+                        memberId = memberId,
+                        amount = amount
+                    )
+                }
+
                 repository.updateExpenseWithSplits(updatedExpense, splitEntities, currentMember)
                 showSuccess("Đã cập nhật khoản chi '$title' thành công!")
             } catch (e: Exception) {
@@ -472,7 +534,13 @@ class TripFinanceViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun deleteExpense(expense: ExpenseEntity) {
+        val currentTrip = uiState.value.currentTrip ?: return
         val currentMember = uiState.value.currentMember ?: return
+
+        if (currentTrip.isSettled) {
+            showError("Chuyến đi '${currentTrip.title}' đã được khóa sổ quyết toán. Không thể xóa khoản chi!")
+            return
+        }
 
         // Strict RBAC: Only Admin can delete expenses
         if (currentMember.role != "ADMIN") {
@@ -500,6 +568,12 @@ class TripFinanceViewModel(application: Application) : AndroidViewModel(applicat
     ) {
         val currentTrip = uiState.value.currentTrip ?: return
         val currentMember = uiState.value.currentMember ?: return
+
+        if (currentTrip.isSettled) {
+            showError("Chuyến đi '${currentTrip.title}' đã được khóa sổ quyết toán. Không thể nộp thêm quỹ!")
+            return
+        }
+
         val members = uiState.value.members
         val contributor = members.find { it.id == memberId }
 
@@ -508,7 +582,7 @@ class TripFinanceViewModel(application: Application) : AndroidViewModel(applicat
             return
         }
 
-        val convertedAmount = (amount.toDouble() * exchangeRate).toLong()
+        val convertedAmount = kotlin.math.round(amount.toDouble() * exchangeRate).toLong()
         val contribution = FundContributionEntity(
             id = UUID.randomUUID().toString(),
             tripId = currentTrip.id,
@@ -532,6 +606,31 @@ class TripFinanceViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
+    fun deleteFundContribution(contribution: FundContributionEntity) {
+        val currentTrip = uiState.value.currentTrip ?: return
+        val currentMember = uiState.value.currentMember ?: return
+
+        if (currentTrip.isSettled) {
+            showError("Chuyến đi '${currentTrip.title}' đã được khóa sổ quyết toán. Không thể xóa khoản nộp quỹ!")
+            return
+        }
+
+        if (currentMember.role != "ADMIN") {
+            showError("Chỉ Trưởng đoàn (Admin) mới có quyền xóa khoản đóng góp quỹ!")
+            return
+        }
+
+        val contributorName = uiState.value.members.find { it.id == contribution.memberId }?.name ?: "Thành viên"
+        viewModelScope.launch {
+            try {
+                repository.deleteFundContribution(contribution, contributorName, currentMember)
+                showSuccess("Đã xóa khoản nộp quỹ của $contributorName")
+            } catch (e: Exception) {
+                showError("Lỗi xóa khoản nộp quỹ: ${e.message}")
+            }
+        }
+    }
+
     // Members & Roles
     fun addMember(
         name: String,
@@ -542,6 +641,11 @@ class TripFinanceViewModel(application: Application) : AndroidViewModel(applicat
     ) {
         val currentTrip = uiState.value.currentTrip ?: return
         val currentMember = uiState.value.currentMember ?: return
+
+        if (currentTrip.isSettled) {
+            showError("Chuyến đi '${currentTrip.title}' đã được khóa sổ quyết toán. Không thể thêm thành viên mới!")
+            return
+        }
 
         if (currentMember.role != "ADMIN" && currentMember.role != "TREASURER") {
             showError("Chỉ Trưởng đoàn hoặc Thủ quỹ mới có quyền thêm thành viên!")
@@ -574,7 +678,14 @@ class TripFinanceViewModel(application: Application) : AndroidViewModel(applicat
         newBankAccount: String?,
         newBankAccountHolder: String?
     ) {
+        val currentTrip = uiState.value.currentTrip ?: return
         val currentMember = uiState.value.currentMember ?: return
+
+        if (currentTrip.isSettled) {
+            showError("Chuyến đi '${currentTrip.title}' đã được khóa sổ quyết toán. Không thể sửa thông tin thành viên!")
+            return
+        }
+
         if (currentMember.role != "ADMIN") {
             showError("Chỉ Trưởng đoàn (Admin) mới có quyền chỉnh sửa thông tin thành viên!")
             return
@@ -598,7 +709,14 @@ class TripFinanceViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun updateMemberRole(member: TripMemberEntity, newRole: String) {
+        val currentTrip = uiState.value.currentTrip ?: return
         val currentMember = uiState.value.currentMember ?: return
+
+        if (currentTrip.isSettled) {
+            showError("Chuyến đi '${currentTrip.title}' đã được khóa sổ quyết toán. Không thể thay đổi vai trò thành viên!")
+            return
+        }
+
         if (currentMember.role != "ADMIN") {
             showError("Chỉ Trưởng đoàn (Admin) mới có quyền thay đổi vai trò thành viên!")
             return
@@ -615,7 +733,14 @@ class TripFinanceViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun removeOrDeactivateMember(member: TripMemberEntity) {
+        val currentTrip = uiState.value.currentTrip ?: return
         val currentMember = uiState.value.currentMember ?: return
+
+        if (currentTrip.isSettled) {
+            showError("Chuyến đi '${currentTrip.title}' đã được khóa sổ quyết toán. Không thể xóa hoặc ngừng hoạt động thành viên!")
+            return
+        }
+
         if (currentMember.role != "ADMIN") {
             showError("Chỉ Trưởng đoàn (Admin) mới có quyền xóa/ngừng hoạt động thành viên!")
             return
@@ -635,6 +760,11 @@ class TripFinanceViewModel(application: Application) : AndroidViewModel(applicat
     fun updateExchangeRate(currencyCode: String, rateToBase: Double) {
         val currentTrip = uiState.value.currentTrip ?: return
         val currentMember = uiState.value.currentMember ?: return
+
+        if (currentTrip.isSettled) {
+            showError("Chuyến đi '${currentTrip.title}' đã được khóa sổ quyết toán. Không thể thay đổi tỷ giá!")
+            return
+        }
 
         if (currentMember.role != "ADMIN" && currentMember.role != "TREASURER") {
             showError("Chỉ Trưởng đoàn hoặc Thủ quỹ mới có quyền cập nhật tỷ giá!")
@@ -664,6 +794,11 @@ class TripFinanceViewModel(application: Application) : AndroidViewModel(applicat
         val currentTrip = uiState.value.currentTrip ?: return
         val currentMember = uiState.value.currentMember ?: return
         val state = uiState.value
+
+        if (currentTrip.isSettled) {
+            showError("Chuyến đi này đã được khóa sổ quyết toán từ trước!")
+            return
+        }
 
         if (currentMember.role != "ADMIN") {
             showError("Chỉ Trưởng đoàn (Admin) mới có quyền khóa sổ và quyết toán chuyến đi!")
@@ -705,6 +840,113 @@ class TripFinanceViewModel(application: Application) : AndroidViewModel(applicat
             } catch (e: Exception) {
                 showError("Lỗi khóa sổ quyết toán: ${e.message}")
             }
+        }
+    }
+
+    fun reopenSettlement() {
+        val currentTrip = uiState.value.currentTrip ?: return
+        val currentMember = uiState.value.currentMember ?: return
+
+        if (!currentTrip.isSettled) {
+            showError("Chuyến đi hiện chưa khóa sổ!")
+            return
+        }
+
+        if (currentMember.role != "ADMIN") {
+            showError("Chỉ Trưởng đoàn (Admin) mới có quyền mở khóa sổ chuyến đi!")
+            return
+        }
+
+        viewModelScope.launch {
+            try {
+                repository.reopenSettlement(currentTrip, currentMember)
+                showSuccess("Đã mở khóa sổ chuyến đi '${currentTrip.title}' thành công! Bạn có thể tiếp tục cập nhật dữ liệu.")
+            } catch (e: Exception) {
+                showError("Lỗi mở khóa sổ: ${e.message}")
+            }
+        }
+    }
+
+    // ==========================================
+    // BACKUP & RECOVERY OPERATIONS
+    // ==========================================
+
+    private val _localBackups = MutableStateFlow<List<File>>(emptyList())
+    val localBackups: StateFlow<List<File>> = _localBackups.asStateFlow()
+
+    fun refreshLocalBackups(context: Context) {
+        viewModelScope.launch {
+            _localBackups.value = repository.listLocalBackups(context)
+        }
+    }
+
+    fun createLocalBackup(context: Context, onCompleted: ((File) -> Unit)? = null) {
+        viewModelScope.launch {
+            try {
+                val file = repository.createLocalBackup(context)
+                refreshLocalBackups(context)
+                showSuccess("Đã tạo bản sao lưu an toàn: ${file.name}")
+                onCompleted?.invoke(file)
+            } catch (e: Exception) {
+                showError("Lỗi tạo sao lưu: ${e.message}")
+            }
+        }
+    }
+
+    fun exportBackupToUri(context: Context, uri: Uri) {
+        viewModelScope.launch {
+            try {
+                val result = repository.exportBackupToUri(context, uri)
+                if (result.isSuccess) {
+                    showSuccess("Đã xuất tệp sao lưu thành công!")
+                } else {
+                    showError("Lỗi xuất tệp: ${result.exceptionOrNull()?.message}")
+                }
+            } catch (e: Exception) {
+                showError("Lỗi xuất sao lưu: ${e.message}")
+            }
+        }
+    }
+
+    fun restoreBackupFromUri(context: Context, uri: Uri, clearExisting: Boolean = false) {
+        viewModelScope.launch {
+            try {
+                val result = repository.restoreBackupFromUri(context, uri, clearExisting)
+                if (result.isSuccess) {
+                    val report = result.getOrThrow()
+                    showSuccess(report.message)
+                    refreshLocalBackups(context)
+                } else {
+                    showError("Lỗi khôi phục sao lưu: ${result.exceptionOrNull()?.message}")
+                }
+            } catch (e: Exception) {
+                showError("Lỗi khôi phục: ${e.message}")
+            }
+        }
+    }
+
+    fun restoreBackupFromFile(context: Context, file: File, clearExisting: Boolean = false) {
+        viewModelScope.launch {
+            try {
+                val result = repository.restoreBackupFromFile(file, clearExisting)
+                if (result.isSuccess) {
+                    val report = result.getOrThrow()
+                    showSuccess(report.message)
+                    refreshLocalBackups(context)
+                } else {
+                    showError("Lỗi khôi phục tệp: ${result.exceptionOrNull()?.message}")
+                }
+            } catch (e: Exception) {
+                showError("Lỗi khôi phục: ${e.message}")
+            }
+        }
+    }
+
+    fun shareBackupFile(context: Context, file: File) {
+        try {
+            repository.shareBackupFile(context, file)
+        } catch (e: Exception) {
+            showError("Lỗi chia sẻ tệp sao lưu: ${e.message}")
         }
     }
 }

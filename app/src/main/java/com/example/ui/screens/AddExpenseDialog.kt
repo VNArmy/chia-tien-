@@ -1,6 +1,7 @@
 package com.example.ui.screens
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -38,11 +39,13 @@ import androidx.compose.ui.window.DialogProperties
 import com.example.data.entity.ExchangeRateEntity
 import com.example.data.entity.TripMemberEntity
 import com.example.domain.engine.SplitCalculator
+import com.example.domain.model.DefaultExchangeRates
 import com.example.ui.components.CategoryIcon
 import com.example.ui.components.NumberFormatUtils
 import com.example.ui.theme.*
 import java.text.SimpleDateFormat
 import java.util.Calendar
+import kotlin.math.abs
 import java.util.Date
 import java.util.Locale
 
@@ -60,7 +63,7 @@ fun AddExpenseDialog(
         category: String,
         payerType: String,
         payerMemberId: String?,
-        totalAmount: Long,
+        totalAmount: Double,
         currency: String,
         exchangeRate: Double,
         splitType: String,
@@ -91,7 +94,14 @@ fun AddExpenseDialog(
     var payerDropdownExpanded by remember { mutableStateOf(false) }
 
     // Amount & Currency
-    var amountText by remember { mutableStateOf(initialExpense?.totalAmount?.toString() ?: "") }
+    var amountText by remember {
+        mutableStateOf(
+            initialExpense?.let { exp ->
+                if (exp.totalAmount % 1.0 == 0.0) exp.totalAmount.toLong().toString()
+                else exp.totalAmount.toString()
+            } ?: ""
+        )
+    }
     var selectedCurrency by remember { mutableStateOf(initialExpense?.currency ?: "VND") }
     var exchangeRateText by remember { mutableStateOf(initialExpense?.exchangeRate?.toString() ?: "1.0") }
 
@@ -154,12 +164,19 @@ fun AddExpenseDialog(
         }
     }
 
-    // Ratio percentages state
+    // Ratio percentages state (Khởi tạo mặc định đảm bảo tổng đúng 100.0%, không bị 99.9% cho 3 người)
     val memberRatios = remember(members) {
         mutableStateMapOf<String, String>().apply {
-            val count = members.count { it.isActive }.coerceAtLeast(1)
-            val defaultRatio = 100.0 / count
-            members.forEach { put(it.id, String.format(Locale.US, "%.1f", if (it.isActive) defaultRatio else 0.0)) }
+            val activeMembers = members.filter { it.isActive }
+            val count = activeMembers.size.coerceAtLeast(1)
+            val baseInt = 1000 / count
+            val remainderInt = 1000 % count
+            activeMembers.forEachIndexed { index, m ->
+                val ratioTenths = baseInt + (if (index < remainderInt) 1 else 0)
+                val ratioDouble = ratioTenths / 10.0
+                put(m.id, String.format(Locale.US, "%.1f", ratioDouble))
+            }
+            members.filter { !it.isActive }.forEach { put(it.id, "0.0") }
         }
     }
 
@@ -182,23 +199,15 @@ fun AddExpenseDialog(
         if (selectedCurrency == "VND") {
             exchangeRateText = "1.0"
         } else {
-            val rate = exchangeRates.find { it.currencyCode == selectedCurrency }?.rateToBase ?: when (selectedCurrency) {
-                "USD" -> 25450.0
-                "EUR" -> 27500.0
-                "JPY" -> 165.0
-                "KRW" -> 18.5
-                "THB" -> 730.0
-                "SGD" -> 19200.0
-                "CNY" -> 3550.0
-                else -> 1.0
-            }
+            val rate = exchangeRates.find { it.currencyCode == selectedCurrency }?.rateToBase
+                ?: DefaultExchangeRates.getRate(selectedCurrency)
             exchangeRateText = if (rate % 1.0 == 0.0) rate.toLong().toString() else rate.toString()
         }
     }
 
-    val parsedAmount = amountText.toLongOrNull() ?: 0L
-    val parsedRate = exchangeRateText.toDoubleOrNull() ?: 1.0
-    val convertedTotalVnd = (parsedAmount * parsedRate).toLong()
+    val parsedAmount = amountText.trim().replace(',', '.').toDoubleOrNull() ?: 0.0
+    val parsedRate = exchangeRateText.trim().replace(',', '.').toDoubleOrNull() ?: 1.0
+    val convertedTotalVnd = kotlin.math.round(parsedAmount * parsedRate).toLong()
 
     // Compute live splits based on selected splitType
     val calculatedSplits: List<Pair<String, Long>> = remember(
@@ -239,14 +248,24 @@ fun AddExpenseDialog(
         }
     }
 
+    val totalRatio = remember(members, memberRatios.toMap()) {
+        members.sumOf { memberRatios[it.id]?.toDoubleOrNull() ?: 0.0 }
+    }
+    val isRatioValid = remember(totalRatio) {
+        abs(totalRatio - 100.0) <= 0.01
+    }
+
     val currentAllocatedSum = calculatedSplits.sumOf { it.second }
-    val isAllocationExact = convertedTotalVnd > 0 && currentAllocatedSum == convertedTotalVnd
+    val hasNoNegativeSplits = calculatedSplits.isNotEmpty() && calculatedSplits.all { it.second >= 0L }
+    val isAllocationExact = convertedTotalVnd > 0 && currentAllocatedSum == convertedTotalVnd && (splitType != "RATIO" || isRatioValid)
     val diff = convertedTotalVnd - currentAllocatedSum
 
     val isPayerValid = payerType == "FUND" || selectedPayerMemberId.isNotBlank()
     val isFormValid = title.isNotBlank() &&
             convertedTotalVnd > 0 &&
             isAllocationExact &&
+            hasNoNegativeSplits &&
+            (splitType != "RATIO" || isRatioValid) &&
             isPayerValid
 
     val focusManager = LocalFocusManager.current
@@ -378,11 +397,17 @@ fun AddExpenseDialog(
                         ) {
                             OutlinedTextField(
                                 value = amountText,
-                                onValueChange = { if (it.all { c -> c.isDigit() }) amountText = it },
+                                onValueChange = { input ->
+                                    val trimmed = input.trim()
+                                    val sepCount = trimmed.count { it == '.' || it == ',' }
+                                    if (sepCount <= 1 && trimmed.all { it.isDigit() || it == '.' || it == ',' }) {
+                                        amountText = trimmed
+                                    }
+                                },
                                 label = { Text("Số tiền *") },
-                                placeholder = { Text("0") },
+                                placeholder = { Text(if (selectedCurrency == "VND") "0" else "0.00") },
                                 keyboardOptions = KeyboardOptions(
-                                    keyboardType = KeyboardType.Number,
+                                    keyboardType = KeyboardType.Decimal,
                                     imeAction = ImeAction.Next
                                 ),
                                 modifier = Modifier
@@ -452,8 +477,9 @@ fun AddExpenseDialog(
                             ).forEach { (addVal, label) ->
                                 SuggestionChip(
                                     onClick = {
-                                        val current = amountText.toLongOrNull() ?: 0L
-                                        amountText = (current + addVal).toString()
+                                        val current = amountText.trim().replace(',', '.').toDoubleOrNull() ?: 0.0
+                                        val updated = current + addVal
+                                        amountText = if (updated % 1.0 == 0.0) updated.toLong().toString() else updated.toString()
                                     },
                                     label = { Text(label, fontSize = 11.sp) }
                                 )
@@ -975,24 +1001,106 @@ fun AddExpenseDialog(
                             }
                         }
                         "RATIO" -> {
-                            Text("Nhập tỷ lệ % chia (tổng các thành viên phải bằng 100%):", fontSize = 11.sp, color = Color(0xFF64748B))
-                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                members.forEach { m ->
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "Nhập tỷ lệ % chia từng người:",
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = Color(0xFF334155)
+                                    )
+
+                                    // Quick Helper Actions
+                                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        OutlinedButton(
+                                            onClick = {
+                                                val activeMembers = members.filter { it.isActive }
+                                                val count = activeMembers.size.coerceAtLeast(1)
+                                                val baseInt = 1000 / count
+                                                val remainderInt = 1000 % count
+                                                activeMembers.forEachIndexed { index, m ->
+                                                    val ratioTenths = baseInt + (if (index < remainderInt) 1 else 0)
+                                                    memberRatios[m.id] = String.format(Locale.US, "%.1f", ratioTenths / 10.0)
+                                                }
+                                                members.filter { !it.isActive }.forEach { memberRatios[it.id] = "0.0" }
+                                            },
+                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                            modifier = Modifier.height(30.dp)
+                                        ) {
+                                            Text("Chia đều", fontSize = 11.sp)
+                                        }
+
+                                        Button(
+                                            onClick = {
+                                                // Tự động bù chênh lệch vào người trả tiền hoặc thành viên đầu tiên để tổng chuẩn xác 100.0%
+                                                val targetMemberId = if (selectedPayerMemberId.isNotBlank()) selectedPayerMemberId else members.firstOrNull { it.isActive }?.id ?: members.firstOrNull()?.id
+                                                if (targetMemberId != null) {
+                                                    val otherSum = members.filter { it.id != targetMemberId }.sumOf { memberRatios[it.id]?.toDoubleOrNull() ?: 0.0 }
+                                                    val balanced = (100.0 - otherSum).coerceAtLeast(0.0)
+                                                    memberRatios[targetMemberId] = String.format(Locale.US, "%.1f", balanced)
+                                                }
+                                            },
+                                            colors = ButtonDefaults.buttonColors(containerColor = IndigoSecondary),
+                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                            modifier = Modifier.height(30.dp)
+                                        ) {
+                                            Text("⚡ Cân bằng 100%", fontSize = 11.sp)
+                                        }
+                                    }
+                                }
+
+                                // Status Badge
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = if (isRatioValid) Color(0xFFDCFCE7) else Color(0xFFFEE2E2),
+                                    border = BorderStroke(1.dp, if (isRatioValid) Color(0xFF86EFAC) else Color(0xFFFCA5A5)),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
                                     Row(
-                                        modifier = Modifier.fillMaxWidth(),
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
                                         horizontalArrangement = Arrangement.SpaceBetween,
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Text(m.name, fontSize = 13.sp, modifier = Modifier.weight(1.5f))
-                                        OutlinedTextField(
-                                            value = memberRatios[m.id] ?: "0",
-                                            onValueChange = { memberRatios[m.id] = it },
-                                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                            trailingIcon = { Text("%", fontSize = 12.sp) },
-                                            modifier = Modifier
-                                                .width(110.dp)
-                                                .height(50.dp)
+                                        Text(
+                                            text = if (isRatioValid) "✓ Tổng tỷ lệ: 100.0% (Chuẩn xác)" else "⚠️ Tổng tỷ lệ: ${String.format(Locale.US, "%.1f", totalRatio)}% (Bắt buộc phải đúng 100.0%)",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (isRatioValid) Color(0xFF15803D) else Color(0xFFB91C1C)
                                         )
+                                        if (!isRatioValid) {
+                                            val diffPercent = 100.0 - totalRatio
+                                            Text(
+                                                text = if (diffPercent > 0) "Thiếu ${String.format(Locale.US, "%.1f", diffPercent)}%" else "Thừa ${String.format(Locale.US, "%.1f", -diffPercent)}%",
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = Color(0xFFB91C1C)
+                                            )
+                                        }
+                                    }
+                                }
+
+                                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    members.forEach { m ->
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(m.name, fontSize = 13.sp, modifier = Modifier.weight(1.5f))
+                                            OutlinedTextField(
+                                                value = memberRatios[m.id] ?: "0",
+                                                onValueChange = { memberRatios[m.id] = it },
+                                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                                trailingIcon = { Text("%", fontSize = 12.sp) },
+                                                modifier = Modifier
+                                                    .width(110.dp)
+                                                    .height(50.dp)
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -1051,10 +1159,18 @@ fun AddExpenseDialog(
                                     color = if (isAllocationExact) Color(0xFF15803D) else Color(0xFFB91C1C)
                                 )
                                 Text(
-                                    text = if (isAllocationExact) "✓ Hợp lệ" else "⚠ Lệch ${NumberFormatUtils.formatVnd(diff)}",
+                                    text = if (isAllocationExact) "✓ Hợp lệ" else if (splitType == "RATIO" && !isRatioValid) "⚠ Tổng % khác 100%" else "⚠ Lệch ${NumberFormatUtils.formatVnd(diff)}",
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = if (isAllocationExact) Color(0xFF15803D) else Color(0xFFDC2626)
+                                )
+                            }
+                            if (splitType == "RATIO" && !isRatioValid) {
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = "Lưu ý: Tổng tỷ lệ hiện tại là ${String.format(Locale.US, "%.1f", totalRatio)}%. Vui lòng bấm 'Cân bằng 100%' hoặc chỉnh sửa để tổng đúng 100.0% trước khi lưu.",
+                                    fontSize = 11.sp,
+                                    color = DangerRed
                                 )
                             }
                             Spacer(modifier = Modifier.height(6.dp))
