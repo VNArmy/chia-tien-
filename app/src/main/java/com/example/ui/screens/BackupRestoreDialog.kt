@@ -22,6 +22,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -48,12 +50,25 @@ fun BackupRestoreDialog(
     var showConfirmRestoreDialog by remember { mutableStateOf(false) }
     var isClearExistingSelected by remember { mutableStateOf(false) }
 
+    // Encryption states for backup creation & export
+    var showCreateOptionsDialog by remember { mutableStateOf(false) }
+    var isCreateExportMode by remember { mutableStateOf(false) }
+    var encryptBackupCheck by remember { mutableStateOf(false) }
+    var backupPasswordField by remember { mutableStateOf("") }
+    var backupPasswordVisible by remember { mutableStateOf(false) }
+    var activeExportPassword by remember { mutableStateOf<String?>(null) }
+
+    // Encryption states for restore
+    var isPendingEncrypted by remember { mutableStateOf(false) }
+    var restorePasswordField by remember { mutableStateOf("") }
+    var restorePasswordVisible by remember { mutableStateOf(false) }
+
     // Launcher for exporting backup to a user-selected URI (SAF)
     val exportDocumentLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("application/json")
     ) { uri: Uri? ->
         if (uri != null) {
-            viewModel.exportBackupToUri(context, uri)
+            viewModel.exportBackupToUri(context, uri, activeExportPassword)
         }
     }
 
@@ -64,6 +79,8 @@ fun BackupRestoreDialog(
         if (uri != null) {
             pendingRestoreUri = uri
             pendingRestoreFile = null
+            isPendingEncrypted = viewModel.isEncryptedBackupUri(context, uri)
+            restorePasswordField = ""
             showConfirmRestoreDialog = true
         }
     }
@@ -168,7 +185,12 @@ fun BackupRestoreDialog(
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Button(
-                        onClick = { viewModel.createLocalBackup(context) },
+                        onClick = {
+                            isCreateExportMode = false
+                            encryptBackupCheck = false
+                            backupPasswordField = ""
+                            showCreateOptionsDialog = true
+                        },
                         shape = RoundedCornerShape(12.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary),
                         contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
@@ -181,8 +203,10 @@ fun BackupRestoreDialog(
 
                     OutlinedButton(
                         onClick = {
-                            val defaultName = "tripfinance_backup_${SimpleDateFormat("yyyyMMdd_HHmm", Locale.getDefault()).format(Date())}.json"
-                            exportDocumentLauncher.launch(defaultName)
+                            isCreateExportMode = true
+                            encryptBackupCheck = false
+                            backupPasswordField = ""
+                            showCreateOptionsDialog = true
                         },
                         shape = RoundedCornerShape(12.dp),
                         contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
@@ -252,6 +276,7 @@ fun BackupRestoreDialog(
                         items(localBackups) { file ->
                             val fileSizeKb = (file.length() / 1024.0)
                             val modifiedDate = dateFormat.format(Date(file.lastModified()))
+                            val isEncrypted = viewModel.isEncryptedBackupFile(file)
 
                             Card(
                                 shape = RoundedCornerShape(12.dp),
@@ -267,13 +292,42 @@ fun BackupRestoreDialog(
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            text = file.name,
-                                            fontSize = 13.sp,
-                                            fontWeight = FontWeight.SemiBold,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text(
+                                                text = file.name,
+                                                fontSize = 13.sp,
+                                                fontWeight = FontWeight.SemiBold,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.weight(1f, fill = false)
+                                            )
+                                            if (isEncrypted) {
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Surface(
+                                                    shape = RoundedCornerShape(4.dp),
+                                                    color = Color(0xFFEFF6FF)
+                                                ) {
+                                                    Row(
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                                                    ) {
+                                                        Icon(
+                                                            Icons.Filled.Lock,
+                                                            contentDescription = "Mã hóa AES-256",
+                                                            tint = Color(0xFF2563EB),
+                                                            modifier = Modifier.size(11.dp)
+                                                        )
+                                                        Spacer(modifier = Modifier.width(2.dp))
+                                                        Text(
+                                                            "AES-256",
+                                                            fontSize = 9.sp,
+                                                            fontWeight = FontWeight.Bold,
+                                                            color = Color(0xFF2563EB)
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
                                         Spacer(modifier = Modifier.height(2.dp))
                                         Text(
                                             text = "$modifiedDate • ${String.format(Locale.US, "%.1f KB", fileSizeKb)}",
@@ -301,6 +355,8 @@ fun BackupRestoreDialog(
                                             onClick = {
                                                 pendingRestoreFile = file
                                                 pendingRestoreUri = null
+                                                isPendingEncrypted = isEncrypted
+                                                restorePasswordField = ""
                                                 showConfirmRestoreDialog = true
                                             },
                                             shape = RoundedCornerShape(8.dp),
@@ -334,21 +390,186 @@ fun BackupRestoreDialog(
         }
     }
 
+    // Dialog for creating / exporting backup with optional AES-GCM password encryption
+    if (showCreateOptionsDialog) {
+        val titleText = if (isCreateExportMode) "Tùy Chọn Xuất Tệp Sao Lưu" else "Tùy Chọn Tạo Bản Sao Lưu"
+        AlertDialog(
+            onDismissRequest = { showCreateOptionsDialog = false },
+            icon = {
+                Icon(
+                    if (encryptBackupCheck) Icons.Filled.Lock else Icons.Filled.Security,
+                    contentDescription = null,
+                    tint = if (encryptBackupCheck) Color(0xFF2563EB) else EmeraldPrimary
+                )
+            },
+            title = {
+                Text(titleText, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        "Bản sao lưu sẽ đóng gói toàn bộ danh sách đoàn, thành viên, các khoản chi, quỹ và lịch sử đối soát.",
+                        fontSize = 12.sp,
+                        color = Color(0xFF475569)
+                    )
+
+                    Surface(
+                        color = Color(0xFFF8FAFC),
+                        shape = RoundedCornerShape(10.dp),
+                        border = BorderStroke(1.dp, Color(0xFFE2E8F0)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(10.dp)) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Checkbox(
+                                    checked = encryptBackupCheck,
+                                    onCheckedChange = { encryptBackupCheck = it }
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Column {
+                                    Text(
+                                        "Mã hóa bảo vệ bằng mật khẩu",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 12.5.sp,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Text(
+                                        "Chuẩn AES-256-GCM + PBKDF2 (Khuyến nghị)",
+                                        fontSize = 10.5.sp,
+                                        color = Color(0xFF2563EB),
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                }
+                            }
+
+                            if (encryptBackupCheck) {
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Text(
+                                    "Mã hóa giúp bảo vệ an toàn tuyệt đối cho số tài khoản ngân hàng và dữ liệu tài chính cá nhân của các thành viên đoàn.",
+                                    fontSize = 10.5.sp,
+                                    color = Color(0xFF64748B),
+                                    lineHeight = 14.sp
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                OutlinedTextField(
+                                    value = backupPasswordField,
+                                    onValueChange = { backupPasswordField = it },
+                                    label = { Text("Mật khẩu bảo vệ sao lưu", fontSize = 12.sp) },
+                                    placeholder = { Text("Nhập mật khẩu tự chọn", fontSize = 11.sp) },
+                                    singleLine = true,
+                                    visualTransformation = if (backupPasswordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                                    trailingIcon = {
+                                        IconButton(onClick = { backupPasswordVisible = !backupPasswordVisible }) {
+                                            Icon(
+                                                if (backupPasswordVisible) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        }
+                                    },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                val isConfirmEnabled = !encryptBackupCheck || backupPasswordField.isNotBlank()
+                Button(
+                    onClick = {
+                        showCreateOptionsDialog = false
+                        val pwd = if (encryptBackupCheck) backupPasswordField.trim() else null
+                        if (isCreateExportMode) {
+                            activeExportPassword = pwd
+                            val defaultName = "tripfinance_backup_${SimpleDateFormat("yyyyMMdd_HHmm", Locale.getDefault()).format(Date())}.json"
+                            exportDocumentLauncher.launch(defaultName)
+                        } else {
+                            viewModel.createLocalBackup(context, pwd)
+                        }
+                    },
+                    enabled = isConfirmEnabled,
+                    colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary)
+                ) {
+                    Text(if (isCreateExportMode) "Tiếp tục xuất" else "Tạo sao lưu ngay")
+                }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { showCreateOptionsDialog = false }) {
+                    Text("Hủy bỏ")
+                }
+            }
+        )
+    }
+
     // Confirmation dialog before restoring
     if (showConfirmRestoreDialog) {
         val targetName = pendingRestoreFile?.name ?: pendingRestoreUri?.lastPathSegment ?: "Tệp sao lưu"
+        val canConfirm = !isPendingEncrypted || restorePasswordField.isNotBlank()
+
         AlertDialog(
             onDismissRequest = { showConfirmRestoreDialog = false },
             icon = {
-                Icon(Icons.Filled.Warning, contentDescription = null, tint = Color(0xFFD97706))
+                Icon(
+                    if (isPendingEncrypted) Icons.Filled.Lock else Icons.Filled.Warning,
+                    contentDescription = null,
+                    tint = if (isPendingEncrypted) Color(0xFF2563EB) else Color(0xFFD97706)
+                )
             },
             title = {
-                Text("Xác nhận khôi phục CSDL", fontWeight = FontWeight.Bold)
+                Text(
+                    text = if (isPendingEncrypted) "Nhập Mật Khẩu Khôi Phục" else "Xác nhận khôi phục CSDL",
+                    fontWeight = FontWeight.Bold
+                )
             },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Bạn sắp nạp dữ liệu từ: $targetName.")
-                    Text("Dữ liệu các chuyến đi, thành viên, quỹ và khoản chi sẽ được tích hợp vào ứng dụng.")
+                    Text("Bạn sắp nạp dữ liệu từ: $targetName.", fontSize = 12.5.sp)
+
+                    if (isPendingEncrypted) {
+                        Surface(
+                            color = Color(0xFFEFF6FF),
+                            shape = RoundedCornerShape(8.dp),
+                            border = BorderStroke(1.dp, Color(0xFFBFDBFE)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(Icons.Filled.Lock, contentDescription = null, tint = Color(0xFF2563EB), modifier = Modifier.size(20.dp))
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    "Tệp sao lưu này được mã hóa bảo vệ (AES-256-GCM). Vui lòng nhập đúng mật khẩu để giải mã.",
+                                    fontSize = 11.sp,
+                                    color = Color(0xFF1E40AF)
+                                )
+                            }
+                        }
+
+                        OutlinedTextField(
+                            value = restorePasswordField,
+                            onValueChange = { restorePasswordField = it },
+                            label = { Text("Mật khẩu giải mã", fontSize = 12.sp) },
+                            singleLine = true,
+                            visualTransformation = if (restorePasswordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                            trailingIcon = {
+                                IconButton(onClick = { restorePasswordVisible = !restorePasswordVisible }) {
+                                    Icon(
+                                        if (restorePasswordVisible) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+
+                    Text("Dữ liệu các chuyến đi, thành viên, quỹ và khoản chi sẽ được tích hợp vào ứng dụng.", fontSize = 11.5.sp, color = Color(0xFF64748B))
 
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -361,7 +582,7 @@ fun BackupRestoreDialog(
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
                             "Xóa sạch dữ liệu hiện tại trước khi khôi phục (Khuyến nghị nếu chuyển máy mới)",
-                            fontSize = 12.sp,
+                            fontSize = 11.sp,
                             color = Color(0xFF475569)
                         )
                     }
@@ -371,12 +592,14 @@ fun BackupRestoreDialog(
                 Button(
                     onClick = {
                         showConfirmRestoreDialog = false
+                        val pwd = if (isPendingEncrypted) restorePasswordField.trim().ifBlank { null } else null
                         if (pendingRestoreFile != null) {
-                            viewModel.restoreBackupFromFile(context, pendingRestoreFile!!, isClearExistingSelected)
+                            viewModel.restoreBackupFromFile(context, pendingRestoreFile!!, isClearExistingSelected, pwd)
                         } else if (pendingRestoreUri != null) {
-                            viewModel.restoreBackupFromUri(context, pendingRestoreUri!!, isClearExistingSelected)
+                            viewModel.restoreBackupFromUri(context, pendingRestoreUri!!, isClearExistingSelected, pwd)
                         }
                     },
+                    enabled = canConfirm,
                     colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary)
                 ) {
                     Text("Tiến hành khôi phục")

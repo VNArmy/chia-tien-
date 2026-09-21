@@ -103,10 +103,18 @@ object SplitCalculator {
     }
 }
 
+data class SettlementCalculationResult(
+    val transfers: List<SettlementTransfer>,
+    val reconciliationError: String? = null
+)
+
 object SettlementEngine {
 
     // Ngưỡng sai số so sánh dập tắt hoàn toàn rủi ro sai số số học khiến vòng lặp chạy vô tận
     const val EPSILON = 0.001
+
+    var lastReconciliationError: String? = null
+        private set
 
     /**
      * Thuật toán Tham Lam (Greedy Algorithm) Tối Ưu Hóa Dòng Tiền:
@@ -114,38 +122,67 @@ object SettlementEngine {
      * - Bằng cách triệt tiêu các khoản lớn trước, rút gọn đáng kể số lượng giao dịch chuyển khoản qua lại.
      * - Khi đoàn có Quỹ chung còn dư (remainingFund > 0) hoặc bị chi vượt (remainingFund < 0):
      *   Quỹ đoàn đóng vai trò là một bên tham gia quyết toán với số dư = -remainingFund.
-     *   - Nếu remainingFund > 0: Quỹ còn tiền thực tế trong tài khoản/két, mang số dư âm (-remainingFund)
-     *     -> Đóng vai trò Debtor (Thủ quỹ trích tiền quỹ chi trả cho thành viên đã chi hộ nhiều).
-     *   - Nếu remainingFund < 0: Quỹ bị chi vượt, mang số dư dương
-     *     -> Đóng vai trò Creditor (Thành viên nộp bù tiền vào quỹ đoàn).
-     * - Đối soát chuẩn: Tổng balance của toàn bộ thành viên luôn bằng remainingFund.
-     *   Khi cộng thêm số dư Quỹ (-remainingFund), tổng đại số toàn hệ thống luôn bằng 0.
-     * - Tránh lỗi vô cực: Dùng EPSILON (0.001) làm mốc so sánh triệt tiêu hoàn toàn rủi ro sai số thập phân.
-     * - Khóa chặt đầu ra: Trả về danh sách SettlementTransfer tinh gọn (Người gửi, Người nhận, Số tiền, Nội dung chuyển khoản).
+     * - Cung cấp biến cờ reconciliationError: String? để cảnh báo rõ ràng khi lệch đối soát.
      */
+    fun computeSettlementWithStatus(
+        memberStatuses: List<MemberFinancialStatus>,
+        tripJoinCode: String,
+        remainingFund: Long = 0L,
+        fundHolder: TripMemberEntity? = null
+    ): SettlementCalculationResult {
+        lastReconciliationError = null
+        if (memberStatuses.isEmpty()) return SettlementCalculationResult(emptyList(), null)
+
+        val totalMemberBalance = memberStatuses.sumOf { it.balance }
+        // Kiểm tra đối soát: Tổng balance toàn đoàn trừ đi số quỹ còn lại phải bằng 0 (cho phép lệch tối đa 5 đồng do làm tròn)
+        val discrepancy = totalMemberBalance - remainingFund
+        if (kotlin.math.abs(discrepancy) > 5L) {
+            val errorMsg = "Chưa thể tạo kế hoạch chuyển khoản do có khoản chi chưa được phân bổ đủ tiền."
+            lastReconciliationError = errorMsg
+            return SettlementCalculationResult(
+                transfers = emptyList(),
+                reconciliationError = errorMsg
+            )
+        }
+
+        val transfers = computeTransfersInternal(
+            memberStatuses = memberStatuses,
+            tripJoinCode = tripJoinCode,
+            remainingFund = remainingFund,
+            fundHolder = fundHolder,
+            totalMemberBalance = totalMemberBalance,
+            discrepancy = discrepancy
+        )
+        return SettlementCalculationResult(transfers = transfers, reconciliationError = null)
+    }
+
     fun computeSimplifiedTransfers(
         memberStatuses: List<MemberFinancialStatus>,
         tripJoinCode: String,
         remainingFund: Long = 0L,
         fundHolder: TripMemberEntity? = null
     ): List<SettlementTransfer> {
-        val totalMemberBalance = memberStatuses.sumOf { it.balance.toDouble() }
-        // Kiểm tra đối soát: Tổng balance toàn đoàn trừ đi số quỹ còn lại phải xấp xỉ 0
-        val discrepancy = totalMemberBalance - remainingFund.toDouble()
-        if (abs(discrepancy) > 5.0) {
-            // Có chênh lệch đối soát chưa cân bằng
-            return emptyList()
-        }
+        return computeSettlementWithStatus(memberStatuses, tripJoinCode, remainingFund, fundHolder).transfers
+    }
 
-        data class BalanceEntry(val member: TripMemberEntity, var balance: Double)
+    private fun computeTransfersInternal(
+        memberStatuses: List<MemberFinancialStatus>,
+        tripJoinCode: String,
+        remainingFund: Long,
+        fundHolder: TripMemberEntity?,
+        totalMemberBalance: Long,
+        discrepancy: Long
+    ): List<SettlementTransfer> {
+        data class BalanceEntry(val member: TripMemberEntity, var balance: Long)
 
         val balanceEntries = mutableListOf<BalanceEntry>()
         memberStatuses.forEach {
-            balanceEntries.add(BalanceEntry(it.member, it.balance.toDouble()))
+            balanceEntries.add(BalanceEntry(it.member, it.balance))
         }
 
         // Nếu quỹ còn dư hoặc bị chi vượt, đưa Quỹ đoàn vào quyết toán như một bên tham gia
-        if (remainingFund != 0L) {
+        // Gán số dư Quỹ = -totalMemberBalance để triệt tiêu tuyệt đối mọi chênh lệch làm tròn
+        if (remainingFund != 0L || discrepancy != 0L) {
             val fundMemberName = if (fundHolder != null) {
                 if (fundHolder.role == "TREASURER") "Quỹ đoàn (Thủ quỹ: ${fundHolder.name})"
                 else "Quỹ đoàn (${fundHolder.name})"
@@ -163,20 +200,19 @@ object SettlementEngine {
                 bankAccountHolder = fundHolder?.bankAccountHolder ?: fundHolder?.name?.uppercase(),
                 joinedAt = 0L
             )
-            // Quỹ có số dư = -remainingFund
-            balanceEntries.add(BalanceEntry(fundMember, -remainingFund.toDouble()))
+            balanceEntries.add(BalanceEntry(fundMember, -totalMemberBalance))
         }
 
         // 1. Phân loại và sắp xếp giảm dần:
-        // Creditors: Bên có balance > EPSILON (được nhận lại tiền)
+        // Creditors: Bên có balance > 0 (được nhận lại tiền)
         val creditors = balanceEntries
-            .filter { it.balance > EPSILON }
+            .filter { it.balance > 0L }
             .sortedByDescending { it.balance }
             .toMutableList()
 
-        // Debtors: Bên có balance < -EPSILON (phải trả / chuyển tiền đi)
+        // Debtors: Bên có balance < 0 (phải trả / chuyển tiền đi)
         val debtors = balanceEntries
-            .filter { it.balance < -EPSILON }
+            .filter { it.balance < 0L }
             .map { BalanceEntry(it.member, -it.balance) }
             .sortedByDescending { it.balance }
             .toMutableList()
@@ -190,21 +226,19 @@ object SettlementEngine {
             val debtor = debtors[i]
             val creditor = creditors[j]
 
-            // Bỏ qua nếu số dư đã tiệm cận 0 (nhỏ hơn EPSILON = 0.001) để tránh vòng lặp vô cực
-            if (debtor.balance <= EPSILON) {
+            if (debtor.balance <= 0L) {
                 i++
                 continue
             }
-            if (creditor.balance <= EPSILON) {
+            if (creditor.balance <= 0L) {
                 j++
                 continue
             }
 
             // Triệt tiêu số tiền nhỏ hơn giữa 2 bên
-            val settleDouble = minOf(debtor.balance, creditor.balance)
-            val settleAmount = settleDouble.roundToLong()
+            val settleAmount = minOf(debtor.balance, creditor.balance)
 
-            if (settleAmount > 0) {
+            if (settleAmount > 0L) {
                 val transferNote = when {
                     debtor.member.id == "FUND_ORGANIZATION" -> "[$tripJoinCode] Trich Quy doan quyet toan cho ${creditor.member.name}"
                     creditor.member.id == "FUND_ORGANIZATION" -> "[$tripJoinCode] ${debtor.member.name} nop bu thieu hut Quy doan"
@@ -222,11 +256,11 @@ object SettlementEngine {
                 )
             }
 
-            debtor.balance -= settleDouble
-            creditor.balance -= settleDouble
+            debtor.balance -= settleAmount
+            creditor.balance -= settleAmount
 
-            if (debtor.balance <= EPSILON) i++
-            if (creditor.balance <= EPSILON) j++
+            if (debtor.balance <= 0L) i++
+            if (creditor.balance <= 0L) j++
         }
 
         return transfers

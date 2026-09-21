@@ -23,6 +23,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -64,6 +65,7 @@ fun MembersAndSettingsScreen(
     var memberToDelete by remember { mutableStateOf<TripMemberEntity?>(null) }
     var showRateDialog by remember { mutableStateOf(false) }
     var showAuditLogsDialog by remember { mutableStateOf(false) }
+    var showPrivacyPolicyDialog by remember { mutableStateOf(false) }
     var copiedCodeNotice by remember { mutableStateOf<String?>(null) }
 
     val currentMember = uiState.currentMember
@@ -335,6 +337,69 @@ fun MembersAndSettingsScreen(
                         Icons.AutoMirrored.Filled.ArrowForward,
                         contentDescription = null,
                         tint = IndigoSecondary,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
+        }
+
+        // Privacy Policy Card (Google Play User Data Policy Compliance)
+        item {
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { showPrivacyPolicyDialog = true }
+                    .testTag("open_privacy_policy_card")
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        modifier = Modifier.weight(1f),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Surface(
+                            shape = CircleShape,
+                            color = EmeraldPrimary.copy(alpha = 0.12f),
+                            modifier = Modifier.size(42.dp)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    Icons.Filled.VerifiedUser,
+                                    contentDescription = null,
+                                    tint = EmeraldPrimary,
+                                    modifier = Modifier.size(22.dp)
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column {
+                            Text(
+                                text = if (lang == AppLanguage.VI) "Chính Sách Quyền Riêng Tư & Bảo Mật" else "Privacy & Data Protection Policy",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = if (lang == AppLanguage.VI) "Bảo vệ thông tin tài chính & AI theo chuẩn Google Play" else "Financial data & AI security per Google Play policies",
+                                fontSize = 11.sp,
+                                color = Color(0xFF64748B)
+                            )
+                        }
+                    }
+
+                    Icon(
+                        Icons.AutoMirrored.Filled.ArrowForward,
+                        contentDescription = null,
+                        tint = Color(0xFF94A3B8),
                         modifier = Modifier.size(18.dp)
                     )
                 }
@@ -630,6 +695,13 @@ fun MembersAndSettingsScreen(
         AuditLogsDialog(
             logs = uiState.auditLogs,
             onDismiss = { showAuditLogsDialog = false }
+        )
+    }
+
+    // Privacy Policy Dialog
+    if (showPrivacyPolicyDialog) {
+        PrivacyPolicyDialog(
+            onDismiss = { showPrivacyPolicyDialog = false }
         )
     }
 }
@@ -1048,6 +1120,121 @@ fun EditMemberDialog(
         },
         dismissButton = {
             TextButton(onClick = safeDismiss) { Text(AppStrings.cancel(lang)) }
+        }
+    )
+}
+
+@Composable
+fun PrivacyPolicyDialog(
+    onDismiss: () -> Unit
+) {
+    val lang = LocalAppLanguage.current
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(decorFitsSystemWindows = true),
+        icon = {
+            Icon(
+                Icons.Filled.Security,
+                contentDescription = null,
+                tint = EmeraldPrimary,
+                modifier = Modifier.size(28.dp)
+            )
+        },
+        title = {
+            Text(
+                text = if (lang == AppLanguage.VI) "Chính Sách Quyền Riêng Tư & An Toàn Dữ Liệu" else "Privacy & Data Safety Policy",
+                fontWeight = FontWeight.Bold,
+                fontSize = 17.sp
+            )
+        },
+        text = {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 420.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                item {
+                    Text(
+                        text = if (lang == AppLanguage.VI) "1. Kiến trúc Sandbox Cục bộ (Local-First)" else "1. Local-First Sandbox Architecture",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        text = if (lang == AppLanguage.VI)
+                            "Ứng dụng TripFinance lưu trữ 100% dữ liệu chi tiêu, danh sách thành viên và quỹ đoàn trong cơ sở dữ liệu SQLite cục bộ được mã hóa theo phân vùng bảo mật riêng của ứng dụng (Android App Sandbox). Ứng dụng đã vô hiệu hóa sao lưu đám mây tự động (allowBackup=false) để bảo vệ toàn vẹn dữ liệu cá nhân."
+                        else
+                            "TripFinance stores 100% of expense, member, and fund records inside an encrypted local SQLite database within the Android Application Sandbox. Automated cloud backup is explicitly disabled (allowBackup=false) to protect user data privacy.",
+                        fontSize = 12.sp,
+                        color = Color(0xFF475569),
+                        lineHeight = 17.sp
+                    )
+                }
+
+                item {
+                    Text(
+                        text = if (lang == AppLanguage.VI) "2. Dữ liệu Tài chính & Số Tài Khoản Ngân Hàng" else "2. Financial Data & Bank Account Numbers",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        text = if (lang == AppLanguage.VI)
+                            "Thông tin số tài khoản và ngân hàng do người dùng nhập chỉ được sử dụng nội bộ nhằm tạo lệnh chuyển khoản quyết toán giữa các thành viên. Hệ thống cam kết không bao giờ thu thập, bán hay chia sẻ số tài khoản cho bất kỳ bên thứ ba hay mạng quảng cáo nào."
+                        else
+                            "Bank account numbers and bank names entered by users are strictly used locally to generate peer-to-peer settlement transfer instructions. TripFinance never transmits, sells, or monetizes this financial info to third parties or ad networks.",
+                        fontSize = 12.sp,
+                        color = Color(0xFF475569),
+                        lineHeight = 17.sp
+                    )
+                }
+
+                item {
+                    Text(
+                        text = if (lang == AppLanguage.VI) "3. Tính năng Cố Vấn Tài Chính Gemini AI" else "3. Gemini AI Financial Advisor Feature",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        text = if (lang == AppLanguage.VI)
+                            "Khi bạn sử dụng tính năng 'Cố vấn chi tiêu AI', hệ thống chỉ gửi dữ liệu số học tổng hợp ẩn danh (tổng chi, danh mục chi, số dư tương đối) qua kết nối HTTPS bảo mật đến Google Gemini API. Dữ liệu gửi đi TUYỆT ĐỐI KHÔNG chứa số tài khoản ngân hàng hay thông tin định danh nhạy cảm. Khuyến nghị AI chỉ mang tính tham khảo."
+                        else
+                            "When using the 'AI Spending Advisor', only aggregated, anonymized financial metrics (total spend, categories, relative balances) are securely sent over HTTPS to the Google Gemini API. Bank account numbers and personal identities are NEVER sent to the AI service. AI insights are advisory only.",
+                        fontSize = 12.sp,
+                        color = Color(0xFF475569),
+                        lineHeight = 17.sp
+                    )
+                }
+
+                item {
+                    Text(
+                        text = if (lang == AppLanguage.VI) "4. Quyền Hạn Thiết Bị & Lưu Trữ (Zero-Permission SAF)" else "4. Permissions & Storage Policy",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        text = if (lang == AppLanguage.VI)
+                            "TripFinance tuân thủ chính sách bảo mật Google Play: Không yêu cầu quyền đọc/ghi bộ nhớ ngoài diện rộng (READ_EXTERNAL_STORAGE). Mọi thao tác xuất báo cáo PDF/Excel và sao lưu JSON đều sử dụng khung lưu trữ an toàn tiêu chuẩn Android Storage Access Framework (SAF)."
+                        else
+                            "TripFinance adheres to Google Play policy: No broad external storage permissions requested. All PDF/Excel export and JSON backup operations rely on the standard Android Storage Access Framework (SAF).",
+                        fontSize = 12.sp,
+                        color = Color(0xFF475569),
+                        lineHeight = 17.sp
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onDismiss,
+                colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary)
+            ) {
+                Text(AppStrings.close(lang))
+            }
         }
     )
 }

@@ -222,6 +222,48 @@ fun SettlementScreen(
             }
         }
 
+        // Reconciliation Error Banner (Requested for Settlement precision)
+        if (uiState.reconciliationError != null) {
+            item {
+                Card(
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFFFEF2F2)),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFFCA5A5)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("reconciliation_error_banner")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(14.dp),
+                        verticalAlignment = Alignment.Top
+                    ) {
+                        Icon(
+                            Icons.Filled.Warning,
+                            contentDescription = null,
+                            tint = Color(0xFFDC2626),
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column {
+                            Text(
+                                text = "Lệch Đối Soát Quyết Toán",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.5.sp,
+                                color = Color(0xFF991B1B)
+                            )
+                            Spacer(modifier = Modifier.height(3.dp))
+                            Text(
+                                text = uiState.reconciliationError!!,
+                                fontSize = 12.sp,
+                                color = Color(0xFFB91C1C),
+                                lineHeight = 16.sp
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
         // Simplified Transfer Instructions
         item {
             Row(
@@ -259,10 +301,39 @@ fun SettlementScreen(
                             .padding(24.dp),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        Icon(Icons.Filled.CheckCircle, contentDescription = null, tint = EmeraldPrimary, modifier = Modifier.size(40.dp))
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Text("Tất cả thành viên đã cân bằng!", fontWeight = FontWeight.Bold, color = EmeraldPrimary)
-                        Text("Không cần chuyển khoản bổ sung thêm", fontSize = 11.sp, color = Color(0xFF64748B))
+                        if (uiState.reconciliationError != null) {
+                            Icon(Icons.Filled.Warning, contentDescription = null, tint = Color(0xFFEF4444), modifier = Modifier.size(40.dp))
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text = uiState.reconciliationError!!,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFEF4444),
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                "Chênh lệch đối soát: ${NumberFormatUtils.formatVnd(uiState.financialSummary.balanceDiscrepancy)}. Vui lòng kiểm tra lại các khoản chi để phân bổ đủ tiền cho các thành viên.",
+                                fontSize = 11.sp,
+                                color = Color(0xFF64748B),
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                            )
+                        } else if (!isBalanced) {
+                            Icon(Icons.Filled.Warning, contentDescription = null, tint = Color(0xFFEF4444), modifier = Modifier.size(40.dp))
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text("Chưa thể tạo quyết toán!", fontWeight = FontWeight.Bold, color = Color(0xFFEF4444))
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                "Phát hiện chênh lệch đối soát (${NumberFormatUtils.formatVnd(uiState.financialSummary.balanceDiscrepancy)}). Vui lòng kiểm tra lại các khoản chi chưa phân bổ đủ.",
+                                fontSize = 11.sp,
+                                color = Color(0xFF64748B),
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                            )
+                        } else {
+                            Icon(Icons.Filled.CheckCircle, contentDescription = null, tint = EmeraldPrimary, modifier = Modifier.size(40.dp))
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text("Tất cả thành viên đã cân bằng!", fontWeight = FontWeight.Bold, color = EmeraldPrimary)
+                            Text("Không cần chuyển khoản bổ sung thêm", fontSize = 11.sp, color = Color(0xFF64748B))
+                        }
                     }
                 }
             }

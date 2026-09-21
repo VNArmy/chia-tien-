@@ -25,6 +25,7 @@ data class UiState(
     val financialSummary: FinancialSummary = FinancialSummary(),
     val memberStatuses: List<MemberFinancialStatus> = emptyList(),
     val settlementTransfers: List<SettlementTransfer> = emptyList(),
+    val reconciliationError: String? = null,
     val categoryBreakdowns: List<CategoryBreakdown> = emptyList(),
     val expenses: List<ExpenseEntity> = emptyList(),
     val allSplits: List<ExpenseSplitEntity> = emptyList(),
@@ -182,7 +183,7 @@ class TripFinanceViewModel(application: Application) : AndroidViewModel(applicat
                         ?: core.members.find { it.role == "ADMIN" && it.isActive }
                         ?: core.members.firstOrNull()
 
-                    val transfers = SettlementEngine.computeSimplifiedTransfers(
+                    val settlementResult = SettlementEngine.computeSettlementWithStatus(
                         memberStatuses = statuses,
                         tripJoinCode = currentTrip.joinCode,
                         remainingFund = summary.remainingFund,
@@ -204,7 +205,8 @@ class TripFinanceViewModel(application: Application) : AndroidViewModel(applicat
                         currentMember = currentMember,
                         financialSummary = summary,
                         memberStatuses = statuses,
-                        settlementTransfers = transfers,
+                        settlementTransfers = settlementResult.transfers,
+                        reconciliationError = settlementResult.reconciliationError,
                         categoryBreakdowns = breakdowns,
                         expenses = filteredExpenses,
                         allSplits = core.splits,
@@ -880,12 +882,17 @@ class TripFinanceViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
-    fun createLocalBackup(context: Context, onCompleted: ((File) -> Unit)? = null) {
+    fun createLocalBackup(context: Context, password: String? = null, onCompleted: ((File) -> Unit)? = null) {
         viewModelScope.launch {
             try {
-                val file = repository.createLocalBackup(context)
+                val file = repository.createLocalBackup(context, password)
                 refreshLocalBackups(context)
-                showSuccess("Đã tạo bản sao lưu an toàn: ${file.name}")
+                val msg = if (!password.isNullOrBlank()) {
+                    "Đã tạo bản sao lưu mã hóa AES-256-GCM: ${file.name}"
+                } else {
+                    "Đã tạo bản sao lưu an toàn: ${file.name}"
+                }
+                showSuccess(msg)
                 onCompleted?.invoke(file)
             } catch (e: Exception) {
                 showError("Lỗi tạo sao lưu: ${e.message}")
@@ -893,12 +900,17 @@ class TripFinanceViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
-    fun exportBackupToUri(context: Context, uri: Uri) {
+    fun exportBackupToUri(context: Context, uri: Uri, password: String? = null) {
         viewModelScope.launch {
             try {
-                val result = repository.exportBackupToUri(context, uri)
+                val result = repository.exportBackupToUri(context, uri, password)
                 if (result.isSuccess) {
-                    showSuccess("Đã xuất tệp sao lưu thành công!")
+                    val msg = if (!password.isNullOrBlank()) {
+                        "Đã xuất tệp sao lưu mã hóa AES-256-GCM thành công!"
+                    } else {
+                        "Đã xuất tệp sao lưu thành công!"
+                    }
+                    showSuccess(msg)
                 } else {
                     showError("Lỗi xuất tệp: ${result.exceptionOrNull()?.message}")
                 }
@@ -908,16 +920,20 @@ class TripFinanceViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
-    fun restoreBackupFromUri(context: Context, uri: Uri, clearExisting: Boolean = false) {
+    fun restoreBackupFromUri(context: Context, uri: Uri, clearExisting: Boolean = false, password: String? = null) {
         viewModelScope.launch {
             try {
-                val result = repository.restoreBackupFromUri(context, uri, clearExisting)
+                val result = repository.restoreBackupFromUri(context, uri, clearExisting, password)
                 if (result.isSuccess) {
                     val report = result.getOrThrow()
                     showSuccess(report.message)
                     refreshLocalBackups(context)
                 } else {
-                    showError("Lỗi khôi phục sao lưu: ${result.exceptionOrNull()?.message}")
+                    val err = result.exceptionOrNull()?.message ?: "Lỗi không xác định"
+                    val userMsg = if (err.contains("ENCRYPTED_BACKUP_PASSWORD_REQUIRED") || err.contains("mật khẩu")) {
+                        "Tệp sao lưu yêu cầu mật khẩu giải mã chính xác."
+                    } else err
+                    showError("Lỗi khôi phục sao lưu: $userMsg")
                 }
             } catch (e: Exception) {
                 showError("Lỗi khôi phục: ${e.message}")
@@ -925,22 +941,29 @@ class TripFinanceViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
-    fun restoreBackupFromFile(context: Context, file: File, clearExisting: Boolean = false) {
+    fun restoreBackupFromFile(context: Context, file: File, clearExisting: Boolean = false, password: String? = null) {
         viewModelScope.launch {
             try {
-                val result = repository.restoreBackupFromFile(file, clearExisting)
+                val result = repository.restoreBackupFromFile(file, clearExisting, password)
                 if (result.isSuccess) {
                     val report = result.getOrThrow()
                     showSuccess(report.message)
                     refreshLocalBackups(context)
                 } else {
-                    showError("Lỗi khôi phục tệp: ${result.exceptionOrNull()?.message}")
+                    val err = result.exceptionOrNull()?.message ?: "Lỗi không xác định"
+                    val userMsg = if (err.contains("ENCRYPTED_BACKUP_PASSWORD_REQUIRED") || err.contains("mật khẩu")) {
+                        "Tệp sao lưu yêu cầu mật khẩu giải mã chính xác."
+                    } else err
+                    showError("Lỗi khôi phục tệp: $userMsg")
                 }
             } catch (e: Exception) {
                 showError("Lỗi khôi phục: ${e.message}")
             }
         }
     }
+
+    fun isEncryptedBackupFile(file: File): Boolean = repository.isEncryptedBackupFile(file)
+    fun isEncryptedBackupUri(context: Context, uri: Uri): Boolean = repository.isEncryptedBackupUri(context, uri)
 
     fun shareBackupFile(context: Context, file: File) {
         try {

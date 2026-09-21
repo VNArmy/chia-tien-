@@ -3,6 +3,8 @@ package com.example.data.backup
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.util.JsonReader
+import android.util.JsonToken
 import androidx.core.content.FileProvider
 import androidx.room.withTransaction
 import com.example.data.db.AppDatabase
@@ -12,6 +14,8 @@ import org.json.JSONObject
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.Reader
+import java.io.StringReader
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -223,12 +227,16 @@ object BackupRestoreManager {
         return root.toString(2)
     }
 
-    suspend fun createLocalBackupFile(context: Context, db: AppDatabase): File {
-        val json = exportBackupToJson(db)
+    suspend fun createLocalBackupFile(context: Context, db: AppDatabase, password: String? = null): File {
+        val rawJson = exportBackupToJson(db)
+        val finalContent = if (!password.isNullOrBlank()) {
+            BackupCryptoUtils.encryptBackup(rawJson, password)
+        } else rawJson
+
         val backupDir = File(context.filesDir, "backups").apply { if (!exists()) mkdirs() }
         val filename = "tripfinance_backup_${fileDateFormat.format(Date())}.json"
         val file = File(backupDir, filename)
-        file.writeText(json, Charsets.UTF_8)
+        file.writeText(finalContent, Charsets.UTF_8)
 
         // Tự động dọn dẹp các bản sao lưu cũ, chỉ giữ lại tối đa 10 bản sao lưu mới nhất
         val files = backupDir.listFiles()?.filter { it.extension == "json" }?.sortedByDescending { it.lastModified() }
@@ -239,11 +247,15 @@ object BackupRestoreManager {
         return file
     }
 
-    suspend fun writeBackupToUri(context: Context, uri: Uri, db: AppDatabase): Result<Unit> {
+    suspend fun writeBackupToUri(context: Context, uri: Uri, db: AppDatabase, password: String? = null): Result<Unit> {
         return try {
-            val json = exportBackupToJson(db)
+            val rawJson = exportBackupToJson(db)
+            val finalContent = if (!password.isNullOrBlank()) {
+                BackupCryptoUtils.encryptBackup(rawJson, password)
+            } else rawJson
+
             context.contentResolver.openOutputStream(uri)?.use { os ->
-                os.write(json.toByteArray(Charsets.UTF_8))
+                os.write(finalContent.toByteArray(Charsets.UTF_8))
                 os.flush()
             } ?: return Result.failure(Exception("Không thể mở tệp để ghi dữ liệu"))
             Result.success(Unit)
@@ -263,186 +275,70 @@ object BackupRestoreManager {
         }
     }
 
-    fun parseAndValidateBackup(jsonString: String): Result<BackupData> {
+    fun parseAndValidateBackup(jsonString: String, password: String? = null): Result<BackupData> {
         return try {
-            val root = JSONObject(jsonString)
-            if (!root.has("metadata") || !root.has("trips") || !root.has("members")) {
-                return Result.failure(IllegalArgumentException("Tệp sao lưu không đúng định dạng của TripFinance!"))
+            val decryptedJson = if (BackupCryptoUtils.isEncryptedBackup(jsonString)) {
+                if (password.isNullOrBlank()) {
+                    return Result.failure(IllegalArgumentException("ENCRYPTED_BACKUP_PASSWORD_REQUIRED"))
+                }
+                val decryptResult = BackupCryptoUtils.decryptBackup(jsonString, password)
+                if (decryptResult.isFailure) {
+                    return Result.failure(decryptResult.exceptionOrNull() ?: Exception("Mật khẩu giải mã không chính xác!"))
+                }
+                decryptResult.getOrThrow()
+            } else {
+                jsonString
             }
 
-            val metaJson = root.getJSONObject("metadata")
-            val metadata = BackupMetadata(
-                appName = metaJson.optString("appName", "TripFinance"),
-                backupVersion = metaJson.optInt("backupVersion", 1),
-                schemaVersion = metaJson.optInt("schemaVersion", 3),
-                createdAt = metaJson.optLong("createdAt", 0L),
-                createdAtFormatted = metaJson.optString("createdAtFormatted", ""),
-                totalTrips = metaJson.optInt("totalTrips", 0),
-                totalMembers = metaJson.optInt("totalMembers", 0),
-                totalExpenses = metaJson.optInt("totalExpenses", 0),
-                totalSplits = metaJson.optInt("totalSplits", 0),
-                totalFunds = metaJson.optInt("totalFunds", 0),
-                totalRates = metaJson.optInt("totalRates", 0),
-                totalSnapshots = metaJson.optInt("totalSnapshots", 0),
-                totalLogs = metaJson.optInt("totalLogs", 0)
-            )
+            parseBackupFromReader(StringReader(decryptedJson))
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
 
+    /**
+     * Đọc và phân tích cú pháp tệp sao lưu trực tiếp từ luồng Reader bằng JsonReader (Streaming API).
+     * Cơ chế này không tải toàn bộ cây đối tượng JSON vào RAM, tối ưu hóa triệt để bộ nhớ khi nhập file dữ liệu lớn.
+     */
+    fun parseBackupFromReader(reader: Reader): Result<BackupData> {
+        return try {
+            val jsonReader = JsonReader(reader)
+            jsonReader.isLenient = true
+
+            var metadata: BackupMetadata? = null
             val tripsList = mutableListOf<TripEntity>()
-            val tripsArray = root.optJSONArray("trips") ?: JSONArray()
-            for (i in 0 until tripsArray.length()) {
-                val obj = tripsArray.getJSONObject(i)
-                tripsList.add(
-                    TripEntity(
-                        id = obj.getString("id"),
-                        title = obj.getString("title"),
-                        description = obj.optString("description", ""),
-                        joinCode = obj.getString("joinCode"),
-                        startDate = obj.getLong("startDate"),
-                        endDate = obj.getLong("endDate"),
-                        baseCurrency = obj.optString("baseCurrency", "VND"),
-                        isSettled = obj.optBoolean("isSettled", false),
-                        settledAt = if (obj.isNull("settledAt")) null else obj.optLong("settledAt"),
-                        createdAt = obj.optLong("createdAt", System.currentTimeMillis())
-                    )
-                )
-            }
-
             val membersList = mutableListOf<TripMemberEntity>()
-            val membersArray = root.optJSONArray("members") ?: JSONArray()
-            for (i in 0 until membersArray.length()) {
-                val obj = membersArray.getJSONObject(i)
-                membersList.add(
-                    TripMemberEntity(
-                        id = obj.getString("id"),
-                        tripId = obj.getString("tripId"),
-                        userId = obj.optString("userId", UUID.randomUUID().toString()),
-                        name = obj.getString("name"),
-                        role = obj.optString("role", "MEMBER"),
-                        bankName = if (obj.isNull("bankName")) null else obj.optString("bankName"),
-                        bankAccount = if (obj.isNull("bankAccount")) null else obj.optString("bankAccount"),
-                        bankAccountHolder = if (obj.isNull("bankAccountHolder")) null else obj.optString("bankAccountHolder"),
-                        isActive = obj.optBoolean("isActive", true),
-                        joinedAt = obj.optLong("joinedAt", System.currentTimeMillis())
-                    )
-                )
-            }
-
             val expensesList = mutableListOf<ExpenseEntity>()
-            val expensesArray = root.optJSONArray("expenses") ?: JSONArray()
-            for (i in 0 until expensesArray.length()) {
-                val obj = expensesArray.getJSONObject(i)
-                expensesList.add(
-                    ExpenseEntity(
-                        id = obj.getString("id"),
-                        tripId = obj.getString("tripId"),
-                        title = obj.getString("title"),
-                        category = obj.optString("category", "OTHER"),
-                        payerType = obj.getString("payerType"),
-                        payerMemberId = if (obj.isNull("payerMemberId")) null else obj.optString("payerMemberId"),
-                        totalAmount = obj.optDouble("totalAmount", obj.optLong("totalAmount", 0L).toDouble()),
-                        currency = obj.optString("currency", "VND"),
-                        exchangeRate = obj.optDouble("exchangeRate", 1.0),
-                        convertedTotalAmount = obj.getLong("convertedTotalAmount"),
-                        splitType = obj.optString("splitType", "EQUAL"),
-                        note = obj.optString("note", ""),
-                        timestamp = obj.getLong("timestamp"),
-                        createdMemberId = obj.optString("createdMemberId", ""),
-                        isSynced = obj.optBoolean("isSynced", true)
-                    )
-                )
-            }
-
             val splitsList = mutableListOf<ExpenseSplitEntity>()
-            val splitsArray = root.optJSONArray("splits") ?: JSONArray()
-            for (i in 0 until splitsArray.length()) {
-                val obj = splitsArray.getJSONObject(i)
-                splitsList.add(
-                    ExpenseSplitEntity(
-                        id = obj.getString("id"),
-                        expenseId = obj.getString("expenseId"),
-                        tripId = obj.getString("tripId"),
-                        memberId = obj.getString("memberId"),
-                        amount = obj.getLong("amount")
-                    )
-                )
-            }
-
             val fundsList = mutableListOf<FundContributionEntity>()
-            val fundsArray = root.optJSONArray("fundContributions") ?: JSONArray()
-            for (i in 0 until fundsArray.length()) {
-                val obj = fundsArray.getJSONObject(i)
-                fundsList.add(
-                    FundContributionEntity(
-                        id = obj.getString("id"),
-                        tripId = obj.getString("tripId"),
-                        memberId = obj.getString("memberId"),
-                        amount = obj.getLong("amount"),
-                        currency = obj.optString("currency", "VND"),
-                        exchangeRate = obj.optDouble("exchangeRate", 1.0),
-                        convertedAmount = obj.getLong("convertedAmount"),
-                        note = obj.optString("note", ""),
-                        timestamp = obj.getLong("timestamp"),
-                        recordedByMemberId = obj.optString("recordedByMemberId", obj.getString("memberId"))
-                    )
-                )
-            }
-
             val ratesList = mutableListOf<ExchangeRateEntity>()
-            val ratesArray = root.optJSONArray("exchangeRates") ?: JSONArray()
-            for (i in 0 until ratesArray.length()) {
-                val obj = ratesArray.getJSONObject(i)
-                ratesList.add(
-                    ExchangeRateEntity(
-                        id = obj.optString("id", UUID.randomUUID().toString()),
-                        tripId = obj.getString("tripId"),
-                        currencyCode = obj.getString("currencyCode"),
-                        rateToBase = obj.getDouble("rateToBase"),
-                        updatedAt = obj.optLong("updatedAt", System.currentTimeMillis())
-                    )
-                )
-            }
-
             val snapshotsList = mutableListOf<SettlementSnapshotEntity>()
-            val snapshotsArray = root.optJSONArray("settlementSnapshots") ?: JSONArray()
-            for (i in 0 until snapshotsArray.length()) {
-                val obj = snapshotsArray.getJSONObject(i)
-                snapshotsList.add(
-                    SettlementSnapshotEntity(
-                        id = obj.getString("id"),
-                        tripId = obj.getString("tripId"),
-                        snapshotTitle = obj.optString("snapshotTitle", "Quyết toán chuyến đi"),
-                        createdAt = obj.optLong("createdAt", System.currentTimeMillis()),
-                        totalExpenses = obj.optLong("totalExpenses", 0L),
-                        totalFundCollected = obj.optLong("totalFundCollected", 0L),
-                        totalFundSpent = obj.optLong("totalFundSpent", 0L),
-                        remainingFund = obj.optLong("remainingFund", 0L),
-                        settlementJson = obj.optString("settlementJson", "{}")
-                    )
-                )
-            }
-
             val logsList = mutableListOf<AuditLogEntity>()
-            val logsArray = root.optJSONArray("auditLogs") ?: JSONArray()
-            for (i in 0 until logsArray.length()) {
-                val obj = logsArray.getJSONObject(i)
-                logsList.add(
-                    AuditLogEntity(
-                        id = obj.getString("id"),
-                        tripId = obj.getString("tripId"),
-                        actorMemberId = obj.optString("actorMemberId", "SYSTEM"),
-                        actorName = obj.optString("actorName", "Hệ thống"),
-                        action = obj.getString("action"),
-                        description = obj.optString("description", ""),
-                        detailBefore = if (obj.isNull("detailBefore")) null else obj.optString("detailBefore"),
-                        detailAfter = if (obj.isNull("detailAfter")) null else obj.optString("detailAfter"),
-                        timestamp = obj.getLong("timestamp")
-                    )
-                )
+
+            jsonReader.beginObject()
+            while (jsonReader.hasNext()) {
+                when (jsonReader.nextName()) {
+                    "metadata" -> metadata = readMetadata(jsonReader)
+                    "trips" -> readTrips(jsonReader, tripsList)
+                    "members" -> readMembers(jsonReader, membersList)
+                    "expenses" -> readExpenses(jsonReader, expensesList)
+                    "splits" -> readSplits(jsonReader, splitsList)
+                    "fundContributions" -> readFunds(jsonReader, fundsList)
+                    "exchangeRates" -> readRates(jsonReader, ratesList)
+                    "settlementSnapshots" -> readSnapshots(jsonReader, snapshotsList)
+                    "auditLogs" -> readLogs(jsonReader, logsList)
+                    else -> jsonReader.skipValue()
+                }
+            }
+            jsonReader.endObject()
+
+            if (metadata == null && tripsList.isEmpty() && membersList.isEmpty()) {
+                return Result.failure(IllegalArgumentException("Tệp sao lưu không đúng định dạng của TripFinance!"))
             }
 
             Result.success(
                 BackupData(
-                    metadata = metadata,
+                    metadata = metadata ?: BackupMetadata(),
                     trips = tripsList,
                     members = membersList,
                     expenses = expensesList,
@@ -455,6 +351,528 @@ object BackupRestoreManager {
             )
         } catch (e: Exception) {
             Result.failure(e)
+        }
+    }
+
+    private fun readMetadata(reader: JsonReader): BackupMetadata {
+        reader.beginObject()
+        var appName = "TripFinance"
+        var backupVersion = 1
+        var schemaVersion = 3
+        var createdAt = 0L
+        var createdAtFormatted = ""
+        var totalTrips = 0
+        var totalMembers = 0
+        var totalExpenses = 0
+        var totalSplits = 0
+        var totalFunds = 0
+        var totalRates = 0
+        var totalSnapshots = 0
+        var totalLogs = 0
+
+        while (reader.hasNext()) {
+            when (reader.nextName()) {
+                "appName" -> appName = reader.nextStringOrDefault("TripFinance")
+                "backupVersion" -> backupVersion = reader.nextIntOrDefault(1)
+                "schemaVersion" -> schemaVersion = reader.nextIntOrDefault(3)
+                "createdAt" -> createdAt = reader.nextLongOrDefault(0L)
+                "createdAtFormatted" -> createdAtFormatted = reader.nextStringOrDefault("")
+                "totalTrips" -> totalTrips = reader.nextIntOrDefault(0)
+                "totalMembers" -> totalMembers = reader.nextIntOrDefault(0)
+                "totalExpenses" -> totalExpenses = reader.nextIntOrDefault(0)
+                "totalSplits" -> totalSplits = reader.nextIntOrDefault(0)
+                "totalFunds" -> totalFunds = reader.nextIntOrDefault(0)
+                "totalRates" -> totalRates = reader.nextIntOrDefault(0)
+                "totalSnapshots" -> totalSnapshots = reader.nextIntOrDefault(0)
+                "totalLogs" -> totalLogs = reader.nextIntOrDefault(0)
+                else -> reader.skipValue()
+            }
+        }
+        reader.endObject()
+        return BackupMetadata(
+            appName = appName,
+            backupVersion = backupVersion,
+            schemaVersion = schemaVersion,
+            createdAt = createdAt,
+            createdAtFormatted = createdAtFormatted,
+            totalTrips = totalTrips,
+            totalMembers = totalMembers,
+            totalExpenses = totalExpenses,
+            totalSplits = totalSplits,
+            totalFunds = totalFunds,
+            totalRates = totalRates,
+            totalSnapshots = totalSnapshots,
+            totalLogs = totalLogs
+        )
+    }
+
+    private fun readTrips(reader: JsonReader, list: MutableList<TripEntity>) {
+        if (reader.peek() == JsonToken.NULL) {
+            reader.nextNull()
+            return
+        }
+        reader.beginArray()
+        while (reader.hasNext()) {
+            reader.beginObject()
+            var id = ""
+            var title = ""
+            var description = ""
+            var joinCode = ""
+            var startDate = 0L
+            var endDate = 0L
+            var baseCurrency = "VND"
+            var isSettled = false
+            var settledAt: Long? = null
+            var createdAt = System.currentTimeMillis()
+
+            while (reader.hasNext()) {
+                when (reader.nextName()) {
+                    "id" -> id = reader.nextStringOrDefault()
+                    "title" -> title = reader.nextStringOrDefault()
+                    "description" -> description = reader.nextStringOrDefault()
+                    "joinCode" -> joinCode = reader.nextStringOrDefault()
+                    "startDate" -> startDate = reader.nextLongOrDefault()
+                    "endDate" -> endDate = reader.nextLongOrDefault()
+                    "baseCurrency" -> baseCurrency = reader.nextStringOrDefault("VND")
+                    "isSettled" -> isSettled = reader.nextBooleanOrDefault()
+                    "settledAt" -> settledAt = reader.nextLongOrNull()
+                    "createdAt" -> createdAt = reader.nextLongOrDefault(System.currentTimeMillis())
+                    else -> reader.skipValue()
+                }
+            }
+            reader.endObject()
+            list.add(
+                TripEntity(
+                    id = id,
+                    title = title,
+                    description = description,
+                    joinCode = joinCode,
+                    startDate = startDate,
+                    endDate = endDate,
+                    baseCurrency = baseCurrency,
+                    isSettled = isSettled,
+                    settledAt = settledAt,
+                    createdAt = createdAt
+                )
+            )
+        }
+        reader.endArray()
+    }
+
+    private fun readMembers(reader: JsonReader, list: MutableList<TripMemberEntity>) {
+        if (reader.peek() == JsonToken.NULL) {
+            reader.nextNull()
+            return
+        }
+        reader.beginArray()
+        while (reader.hasNext()) {
+            reader.beginObject()
+            var id = ""
+            var tripId = ""
+            var userId = UUID.randomUUID().toString()
+            var name = ""
+            var role = "MEMBER"
+            var bankName: String? = null
+            var bankAccount: String? = null
+            var bankAccountHolder: String? = null
+            var isActive = true
+            var joinedAt = System.currentTimeMillis()
+
+            while (reader.hasNext()) {
+                when (reader.nextName()) {
+                    "id" -> id = reader.nextStringOrDefault()
+                    "tripId" -> tripId = reader.nextStringOrDefault()
+                    "userId" -> userId = reader.nextStringOrDefault(UUID.randomUUID().toString())
+                    "name" -> name = reader.nextStringOrDefault()
+                    "role" -> role = reader.nextStringOrDefault("MEMBER")
+                    "bankName" -> bankName = reader.nextStringOrNull()
+                    "bankAccount" -> bankAccount = reader.nextStringOrNull()
+                    "bankAccountHolder" -> bankAccountHolder = reader.nextStringOrNull()
+                    "isActive" -> isActive = reader.nextBooleanOrDefault(true)
+                    "joinedAt" -> joinedAt = reader.nextLongOrDefault(System.currentTimeMillis())
+                    else -> reader.skipValue()
+                }
+            }
+            reader.endObject()
+            list.add(
+                TripMemberEntity(
+                    id = id,
+                    tripId = tripId,
+                    userId = userId,
+                    name = name,
+                    role = role,
+                    bankName = bankName,
+                    bankAccount = bankAccount,
+                    bankAccountHolder = bankAccountHolder,
+                    isActive = isActive,
+                    joinedAt = joinedAt
+                )
+            )
+        }
+        reader.endArray()
+    }
+
+    private fun readExpenses(reader: JsonReader, list: MutableList<ExpenseEntity>) {
+        if (reader.peek() == JsonToken.NULL) {
+            reader.nextNull()
+            return
+        }
+        reader.beginArray()
+        while (reader.hasNext()) {
+            reader.beginObject()
+            var id = ""
+            var tripId = ""
+            var title = ""
+            var category = "OTHER"
+            var payerType = "MEMBER"
+            var payerMemberId: String? = null
+            var totalAmount = 0.0
+            var currency = "VND"
+            var exchangeRate = 1.0
+            var convertedTotalAmount = 0L
+            var splitType = "EQUAL"
+            var note = ""
+            var timestamp = 0L
+            var createdMemberId = ""
+            var isSynced = true
+
+            while (reader.hasNext()) {
+                when (reader.nextName()) {
+                    "id" -> id = reader.nextStringOrDefault()
+                    "tripId" -> tripId = reader.nextStringOrDefault()
+                    "title" -> title = reader.nextStringOrDefault()
+                    "category" -> category = reader.nextStringOrDefault("OTHER")
+                    "payerType" -> payerType = reader.nextStringOrDefault("MEMBER")
+                    "payerMemberId" -> payerMemberId = reader.nextStringOrNull()
+                    "totalAmount" -> totalAmount = reader.nextDoubleOrDefault(0.0)
+                    "currency" -> currency = reader.nextStringOrDefault("VND")
+                    "exchangeRate" -> exchangeRate = reader.nextDoubleOrDefault(1.0)
+                    "convertedTotalAmount" -> convertedTotalAmount = reader.nextLongOrDefault(0L)
+                    "splitType" -> splitType = reader.nextStringOrDefault("EQUAL")
+                    "note" -> note = reader.nextStringOrDefault("")
+                    "timestamp" -> timestamp = reader.nextLongOrDefault(0L)
+                    "createdMemberId" -> createdMemberId = reader.nextStringOrDefault("")
+                    "isSynced" -> isSynced = reader.nextBooleanOrDefault(true)
+                    else -> reader.skipValue()
+                }
+            }
+            reader.endObject()
+            list.add(
+                ExpenseEntity(
+                    id = id,
+                    tripId = tripId,
+                    title = title,
+                    category = category,
+                    payerType = payerType,
+                    payerMemberId = payerMemberId,
+                    totalAmount = totalAmount,
+                    currency = currency,
+                    exchangeRate = exchangeRate,
+                    convertedTotalAmount = convertedTotalAmount,
+                    splitType = splitType,
+                    note = note,
+                    timestamp = timestamp,
+                    createdMemberId = createdMemberId,
+                    isSynced = isSynced
+                )
+            )
+        }
+        reader.endArray()
+    }
+
+    private fun readSplits(reader: JsonReader, list: MutableList<ExpenseSplitEntity>) {
+        if (reader.peek() == JsonToken.NULL) {
+            reader.nextNull()
+            return
+        }
+        reader.beginArray()
+        while (reader.hasNext()) {
+            reader.beginObject()
+            var id = ""
+            var expenseId = ""
+            var tripId = ""
+            var memberId = ""
+            var amount = 0L
+
+            while (reader.hasNext()) {
+                when (reader.nextName()) {
+                    "id" -> id = reader.nextStringOrDefault()
+                    "expenseId" -> expenseId = reader.nextStringOrDefault()
+                    "tripId" -> tripId = reader.nextStringOrDefault()
+                    "memberId" -> memberId = reader.nextStringOrDefault()
+                    "amount" -> amount = reader.nextLongOrDefault(0L)
+                    else -> reader.skipValue()
+                }
+            }
+            reader.endObject()
+            list.add(
+                ExpenseSplitEntity(
+                    id = id,
+                    expenseId = expenseId,
+                    tripId = tripId,
+                    memberId = memberId,
+                    amount = amount
+                )
+            )
+        }
+        reader.endArray()
+    }
+
+    private fun readFunds(reader: JsonReader, list: MutableList<FundContributionEntity>) {
+        if (reader.peek() == JsonToken.NULL) {
+            reader.nextNull()
+            return
+        }
+        reader.beginArray()
+        while (reader.hasNext()) {
+            reader.beginObject()
+            var id = ""
+            var tripId = ""
+            var memberId = ""
+            var amount = 0L
+            var currency = "VND"
+            var exchangeRate = 1.0
+            var convertedAmount = 0L
+            var note = ""
+            var timestamp = 0L
+            var recordedByMemberId = ""
+
+            while (reader.hasNext()) {
+                when (reader.nextName()) {
+                    "id" -> id = reader.nextStringOrDefault()
+                    "tripId" -> tripId = reader.nextStringOrDefault()
+                    "memberId" -> {
+                        memberId = reader.nextStringOrDefault()
+                        if (recordedByMemberId.isEmpty()) recordedByMemberId = memberId
+                    }
+                    "amount" -> amount = reader.nextLongOrDefault(0L)
+                    "currency" -> currency = reader.nextStringOrDefault("VND")
+                    "exchangeRate" -> exchangeRate = reader.nextDoubleOrDefault(1.0)
+                    "convertedAmount" -> convertedAmount = reader.nextLongOrDefault(0L)
+                    "note" -> note = reader.nextStringOrDefault("")
+                    "timestamp" -> timestamp = reader.nextLongOrDefault(0L)
+                    "recordedByMemberId" -> recordedByMemberId = reader.nextStringOrDefault("")
+                    else -> reader.skipValue()
+                }
+            }
+            reader.endObject()
+            list.add(
+                FundContributionEntity(
+                    id = id,
+                    tripId = tripId,
+                    memberId = memberId,
+                    amount = amount,
+                    currency = currency,
+                    exchangeRate = exchangeRate,
+                    convertedAmount = convertedAmount,
+                    note = note,
+                    timestamp = timestamp,
+                    recordedByMemberId = if (recordedByMemberId.isNotEmpty()) recordedByMemberId else memberId
+                )
+            )
+        }
+        reader.endArray()
+    }
+
+    private fun readRates(reader: JsonReader, list: MutableList<ExchangeRateEntity>) {
+        if (reader.peek() == JsonToken.NULL) {
+            reader.nextNull()
+            return
+        }
+        reader.beginArray()
+        while (reader.hasNext()) {
+            reader.beginObject()
+            var id = UUID.randomUUID().toString()
+            var tripId = ""
+            var currencyCode = ""
+            var rateToBase = 1.0
+            var updatedAt = System.currentTimeMillis()
+
+            while (reader.hasNext()) {
+                when (reader.nextName()) {
+                    "id" -> id = reader.nextStringOrDefault(UUID.randomUUID().toString())
+                    "tripId" -> tripId = reader.nextStringOrDefault()
+                    "currencyCode" -> currencyCode = reader.nextStringOrDefault()
+                    "rateToBase" -> rateToBase = reader.nextDoubleOrDefault(1.0)
+                    "updatedAt" -> updatedAt = reader.nextLongOrDefault(System.currentTimeMillis())
+                    else -> reader.skipValue()
+                }
+            }
+            reader.endObject()
+            list.add(
+                ExchangeRateEntity(
+                    id = id,
+                    tripId = tripId,
+                    currencyCode = currencyCode,
+                    rateToBase = rateToBase,
+                    updatedAt = updatedAt
+                )
+            )
+        }
+        reader.endArray()
+    }
+
+    private fun readSnapshots(reader: JsonReader, list: MutableList<SettlementSnapshotEntity>) {
+        if (reader.peek() == JsonToken.NULL) {
+            reader.nextNull()
+            return
+        }
+        reader.beginArray()
+        while (reader.hasNext()) {
+            reader.beginObject()
+            var id = ""
+            var tripId = ""
+            var snapshotTitle = "Quyết toán chuyến đi"
+            var createdAt = System.currentTimeMillis()
+            var totalExpenses = 0L
+            var totalFundCollected = 0L
+            var totalFundSpent = 0L
+            var remainingFund = 0L
+            var settlementJson = "{}"
+
+            while (reader.hasNext()) {
+                when (reader.nextName()) {
+                    "id" -> id = reader.nextStringOrDefault()
+                    "tripId" -> tripId = reader.nextStringOrDefault()
+                    "snapshotTitle" -> snapshotTitle = reader.nextStringOrDefault("Quyết toán chuyến đi")
+                    "createdAt" -> createdAt = reader.nextLongOrDefault(System.currentTimeMillis())
+                    "totalExpenses" -> totalExpenses = reader.nextLongOrDefault(0L)
+                    "totalFundCollected" -> totalFundCollected = reader.nextLongOrDefault(0L)
+                    "totalFundSpent" -> totalFundSpent = reader.nextLongOrDefault(0L)
+                    "remainingFund" -> remainingFund = reader.nextLongOrDefault(0L)
+                    "settlementJson" -> settlementJson = reader.nextStringOrDefault("{}")
+                    else -> reader.skipValue()
+                }
+            }
+            reader.endObject()
+            list.add(
+                SettlementSnapshotEntity(
+                    id = id,
+                    tripId = tripId,
+                    snapshotTitle = snapshotTitle,
+                    createdAt = createdAt,
+                    totalExpenses = totalExpenses,
+                    totalFundCollected = totalFundCollected,
+                    totalFundSpent = totalFundSpent,
+                    remainingFund = remainingFund,
+                    settlementJson = settlementJson
+                )
+            )
+        }
+        reader.endArray()
+    }
+
+    private fun readLogs(reader: JsonReader, list: MutableList<AuditLogEntity>) {
+        if (reader.peek() == JsonToken.NULL) {
+            reader.nextNull()
+            return
+        }
+        reader.beginArray()
+        while (reader.hasNext()) {
+            reader.beginObject()
+            var id = ""
+            var tripId = ""
+            var actorMemberId = "SYSTEM"
+            var actorName = "Hệ thống"
+            var action = ""
+            var description = ""
+            var detailBefore: String? = null
+            var detailAfter: String? = null
+            var timestamp = 0L
+
+            while (reader.hasNext()) {
+                when (reader.nextName()) {
+                    "id" -> id = reader.nextStringOrDefault()
+                    "tripId" -> tripId = reader.nextStringOrDefault()
+                    "actorMemberId" -> actorMemberId = reader.nextStringOrDefault("SYSTEM")
+                    "actorName" -> actorName = reader.nextStringOrDefault("Hệ thống")
+                    "action" -> action = reader.nextStringOrDefault()
+                    "description" -> description = reader.nextStringOrDefault()
+                    "detailBefore" -> detailBefore = reader.nextStringOrNull()
+                    "detailAfter" -> detailAfter = reader.nextStringOrNull()
+                    "timestamp" -> timestamp = reader.nextLongOrDefault(0L)
+                    else -> reader.skipValue()
+                }
+            }
+            reader.endObject()
+            list.add(
+                AuditLogEntity(
+                    id = id,
+                    tripId = tripId,
+                    actorMemberId = actorMemberId,
+                    actorName = actorName,
+                    action = action,
+                    description = description,
+                    detailBefore = detailBefore,
+                    detailAfter = detailAfter,
+                    timestamp = timestamp
+                )
+            )
+        }
+        reader.endArray()
+    }
+
+    // Helper extension functions for safe streaming reading
+    private fun JsonReader.nextStringOrNull(): String? {
+        return if (peek() == JsonToken.NULL) {
+            nextNull()
+            null
+        } else {
+            nextString()
+        }
+    }
+
+    private fun JsonReader.nextLongOrNull(): Long? {
+        return if (peek() == JsonToken.NULL) {
+            nextNull()
+            null
+        } else {
+            nextLong()
+        }
+    }
+
+    private fun JsonReader.nextStringOrDefault(default: String = ""): String {
+        return if (peek() == JsonToken.NULL) {
+            nextNull()
+            default
+        } else {
+            nextString()
+        }
+    }
+
+    private fun JsonReader.nextLongOrDefault(default: Long = 0L): Long {
+        return if (peek() == JsonToken.NULL) {
+            nextNull()
+            default
+        } else {
+            nextLong()
+        }
+    }
+
+    private fun JsonReader.nextIntOrDefault(default: Int = 0): Int {
+        return if (peek() == JsonToken.NULL) {
+            nextNull()
+            default
+        } else {
+            nextInt()
+        }
+    }
+
+    private fun JsonReader.nextDoubleOrDefault(default: Double = 0.0): Double {
+        return if (peek() == JsonToken.NULL) {
+            nextNull()
+            default
+        } else {
+            nextDouble()
+        }
+    }
+
+    private fun JsonReader.nextBooleanOrDefault(default: Boolean = false): Boolean {
+        return if (peek() == JsonToken.NULL) {
+            nextNull()
+            default
+        } else {
+            nextBoolean()
         }
     }
 

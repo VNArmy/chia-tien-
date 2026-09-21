@@ -8,6 +8,9 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.example.data.dao.*
 import com.example.data.entity.*
+import com.example.data.security.DatabaseKeyManager
+import net.sqlcipher.database.SQLiteDatabase
+import net.sqlcipher.database.SupportFactory
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -110,13 +113,28 @@ abstract class AppDatabase : RoomDatabase() {
 
         fun getDatabase(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
-                val instance = Room.databaseBuilder(
+                val passphrase = DatabaseKeyManager.getOrCreateDatabasePassphrase(context)
+                val sqlCipherFactory = try {
+                    SQLiteDatabase.loadLibs(context)
+                    SupportFactory(passphrase)
+                } catch (e: Throwable) {
+                    android.util.Log.w("AppDatabase", "SQLCipher native libraries not available in current runtime (e.g. JVM test): ${e.message}")
+                    null
+                }
+
+                val builder = Room.databaseBuilder(
                     context.applicationContext,
                     AppDatabase::class.java,
                     "trip_finance_database"
                 )
                 .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                 .fallbackToDestructiveMigration()
+
+                if (sqlCipherFactory != null) {
+                    builder.openHelperFactory(sqlCipherFactory)
+                }
+
+                val instance = builder
                 .addCallback(object : Callback() {
                     override fun onOpen(db: SupportSQLiteDatabase) {
                         super.onOpen(db)

@@ -7,6 +7,7 @@ import org.json.JSONObject
 import com.example.data.backup.BackupData
 import com.example.data.backup.BackupMetadata
 import com.example.data.backup.BackupRestoreManager
+import com.example.data.backup.BackupCryptoUtils
 import com.example.data.backup.RestoreResult
 import com.example.data.db.AppDatabase
 import com.example.data.entity.*
@@ -643,30 +644,46 @@ class TripFinanceRepository(private val db: AppDatabase) {
     // BACKUP & RESTORE REPOSITORY OPERATIONS
     // ==========================================
 
-    suspend fun createLocalBackup(context: Context): File {
-        return BackupRestoreManager.createLocalBackupFile(context, db)
+    suspend fun createLocalBackup(context: Context, password: String? = null): File {
+        return BackupRestoreManager.createLocalBackupFile(context, db, password)
     }
 
-    suspend fun exportBackupToUri(context: Context, uri: Uri): Result<Unit> {
-        return BackupRestoreManager.writeBackupToUri(context, uri, db)
+    suspend fun exportBackupToUri(context: Context, uri: Uri, password: String? = null): Result<Unit> {
+        return BackupRestoreManager.writeBackupToUri(context, uri, db, password)
     }
 
-    suspend fun restoreBackupFromUri(context: Context, uri: Uri, clearExisting: Boolean = false): Result<RestoreResult> {
+    fun isEncryptedBackupUri(context: Context, uri: Uri): Boolean {
+        val readResult = BackupRestoreManager.readBackupFromUri(context, uri)
+        return if (readResult.isSuccess) {
+            BackupCryptoUtils.isEncryptedBackup(readResult.getOrThrow())
+        } else false
+    }
+
+    fun isEncryptedBackupFile(file: File): Boolean {
+        return try {
+            val content = file.readText(Charsets.UTF_8)
+            BackupCryptoUtils.isEncryptedBackup(content)
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    suspend fun restoreBackupFromUri(context: Context, uri: Uri, clearExisting: Boolean = false, password: String? = null): Result<RestoreResult> {
         val readResult = BackupRestoreManager.readBackupFromUri(context, uri)
         if (readResult.isFailure) {
             return Result.failure(readResult.exceptionOrNull() ?: Exception("Không thể đọc tệp sao lưu"))
         }
-        val parseResult = BackupRestoreManager.parseAndValidateBackup(readResult.getOrThrow())
+        val parseResult = BackupRestoreManager.parseAndValidateBackup(readResult.getOrThrow(), password)
         if (parseResult.isFailure) {
             return Result.failure(parseResult.exceptionOrNull() ?: Exception("Dữ liệu sao lưu không hợp lệ"))
         }
         return BackupRestoreManager.restoreFromBackupData(db, parseResult.getOrThrow(), clearExisting)
     }
 
-    suspend fun restoreBackupFromFile(file: File, clearExisting: Boolean = false): Result<RestoreResult> {
+    suspend fun restoreBackupFromFile(file: File, clearExisting: Boolean = false, password: String? = null): Result<RestoreResult> {
         return try {
             val json = file.readText(Charsets.UTF_8)
-            val parseResult = BackupRestoreManager.parseAndValidateBackup(json)
+            val parseResult = BackupRestoreManager.parseAndValidateBackup(json, password)
             if (parseResult.isFailure) {
                 return Result.failure(parseResult.exceptionOrNull() ?: Exception("Dữ liệu sao lưu không hợp lệ"))
             }
