@@ -238,4 +238,23 @@ class ExampleRobolectricTest {
         val remainingExpenses = repository.getExpenses(tripId).first()
         assertTrue(remainingExpenses.isEmpty())
     }
+
+    @Test
+    fun `test BackupCryptoUtils encryption and decryption roundtrip`() {
+        val sampleJson = """{"version":1,"appName":"TripFinance","data":"secret_account_number_123456"}"""
+        val password = "SuperSecretPassword#2026"
+
+        val encrypted = com.example.data.backup.BackupCryptoUtils.encryptBackup(sampleJson, password)
+        assertTrue(com.example.data.backup.BackupCryptoUtils.isEncryptedBackup(encrypted))
+        assertTrue(com.example.data.backup.BackupCryptoUtils.isEncryptedBackupSnippet(encrypted.take(500)))
+
+        // Decrypt with correct password
+        val decryptSuccess = com.example.data.backup.BackupCryptoUtils.decryptBackup(encrypted, password)
+        assertTrue(decryptSuccess.isSuccess)
+        assertEquals(sampleJson, decryptSuccess.getOrThrow())
+
+        // Decrypt with wrong password
+        val decryptFailure = com.example.data.backup.BackupCryptoUtils.decryptBackup(encrypted, "WrongPassword#999")
+        assertTrue(decryptFailure.isFailure)
+    }
 }

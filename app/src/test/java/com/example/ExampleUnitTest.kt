@@ -121,4 +121,44 @@ class ExampleUnitTest {
 
         assertTrue(transfers.isEmpty())
     }
+
+    @Test
+    fun `test SplitCalculator equal split remainder distribution`() {
+        val members = listOf("user_1", "user_2", "user_3")
+        // 100,000 VND / 3 = 33,333 per person with remainder 1 VND
+        val splits = com.example.domain.engine.SplitCalculator.calculateEqualSplit(
+            totalAmount = 100000L,
+            memberIds = members,
+            primaryMemberId = "user_2"
+        )
+        assertEquals(3, splits.size)
+        val user1 = splits.find { it.first == "user_1" }?.second
+        val user2 = splits.find { it.first == "user_2" }?.second
+        val user3 = splits.find { it.first == "user_3" }?.second
+
+        assertEquals(33333L, user1)
+        assertEquals(33334L, user2) // primaryMemberId gets remainder 1 VND
+        assertEquals(33333L, user3)
+        assertEquals(100000L, splits.sumOf { it.second })
+    }
+
+    @Test
+    fun `test SplitCalculator ratio split validation and exact rounding`() {
+        // Test 1: Exactly 100%
+        val ratiosValid = listOf("user_1" to 33.33, "user_2" to 33.33, "user_3" to 33.34)
+        val (splitsValid, isValid) = com.example.domain.engine.SplitCalculator.calculateRatioSplit(
+            totalAmount = 100000L,
+            memberRatios = ratiosValid
+        )
+        assertTrue("Total 100% ratio should be valid", isValid)
+        assertEquals(100000L, splitsValid.sumOf { it.second })
+
+        // Test 2: Incomplete ratio (< 100%)
+        val ratiosIncomplete = listOf("user_1" to 50.0, "user_2" to 30.0)
+        val (_, isInvalid) = com.example.domain.engine.SplitCalculator.calculateRatioSplit(
+            totalAmount = 100000L,
+            memberRatios = ratiosIncomplete
+        )
+        assertFalse("80% total ratio should NOT be valid", isInvalid)
+    }
 }

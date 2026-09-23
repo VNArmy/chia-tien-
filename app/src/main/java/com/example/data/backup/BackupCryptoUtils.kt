@@ -26,12 +26,31 @@ object BackupCryptoUtils {
     const val ENCRYPTED_MAGIC_FORMAT = "TRIPFINANCE_ENCRYPTED_BACKUP"
 
     /**
-     * Kiểm tra xem tệp JSON có phải là bản sao lưu được mã hóa bằng mật khẩu hay không
+     * Kiểm tra nhanh xem đoạn đầu tệp tin (snippet) có chứa thông tin mã hóa hay không.
+     * Cho phép nhận diện tệp mã hóa chỉ bằng việc đọc 1-2 KB đầu tệp mà không cần nạp toàn bộ tệp lớn vào RAM.
+     *
+     * @param snippet Đoạn văn bản đầu tiên của tệp tin sao lưu (tối thiểu 512 ký tự)
+     * @return true nếu tệp là định dạng sao lưu có mã hóa mật khẩu của TripFinance
+     */
+    fun isEncryptedBackupSnippet(snippet: String): Boolean {
+        val trimmed = snippet.trim()
+        if (!trimmed.startsWith("{")) return false
+        return (trimmed.contains("\"encrypted\":true") ||
+                trimmed.contains("\"encrypted\": true")) &&
+               (trimmed.contains(ENCRYPTED_MAGIC_FORMAT) || trimmed.contains("\"ciphertext\""))
+    }
+
+    /**
+     * Kiểm tra xem toàn bộ chuỗi JSON có phải là bản sao lưu được mã hóa bằng mật khẩu hay không
+     *
+     * @param jsonString Nội dung chuỗi JSON cần thẩm tra
+     * @return true nếu tệp được mã hóa và có đầy đủ thông tin giải mã
      */
     fun isEncryptedBackup(jsonString: String): Boolean {
         return try {
             val trimmed = jsonString.trim()
             if (!trimmed.startsWith("{")) return false
+            if (isEncryptedBackupSnippet(trimmed.take(2048))) return true
             val obj = JSONObject(trimmed)
             obj.optBoolean("encrypted", false) && (obj.optString("format") == ENCRYPTED_MAGIC_FORMAT || obj.has("ciphertext"))
         } catch (_: Exception) {

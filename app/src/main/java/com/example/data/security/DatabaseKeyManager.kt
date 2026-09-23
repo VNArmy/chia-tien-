@@ -38,7 +38,7 @@ object DatabaseKeyManager {
             val masterKey = getOrCreateMasterKey()
 
             if (encryptedPassphraseB64 != null && ivB64 != null) {
-                // Đã có khóa mã hóa trước đó, giải mã bằng Android KeyStore
+                // Đã có khóa mã hóa trước đó, giải mã an toàn bằng Android KeyStore phần cứng
                 val cipher = Cipher.getInstance("AES/GCM/NoPadding")
                 val iv = Base64.decode(ivB64, Base64.NO_WRAP)
                 val encryptedBytes = Base64.decode(encryptedPassphraseB64, Base64.NO_WRAP)
@@ -46,7 +46,7 @@ object DatabaseKeyManager {
                 cipher.init(Cipher.DECRYPT_MODE, masterKey, spec)
                 cipher.doFinal(encryptedBytes)
             } else {
-                // Lần khởi tạo đầu tiên: Tạo chuỗi 32 byte ngẫu nhiên chuẩn mật mã
+                // Lần khởi tạo đầu tiên: Tạo chuỗi 32 byte ngẫu nhiên chuẩn mật mã (CSPRNG)
                 val rawPassphrase = ByteArray(PASSPHRASE_LENGTH_BYTES)
                 SecureRandom().nextBytes(rawPassphrase)
 
@@ -63,8 +63,13 @@ object DatabaseKeyManager {
                 rawPassphrase
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Lỗi truy xuất phần cứng Android KeyStore, sử dụng cơ chế bảo vệ dự phòng: ${e.message}", e)
-            // Dự phòng cho môi trường giả lập/test không có hardware keystore
+            Log.e(TAG, "Lỗi truy xuất phần cứng Android KeyStore: ${e.message}", e)
+            // Nếu CSDL đã được mã hóa trước đó bằng KeyStore mà KeyStore tạm thời lỗi,
+            // không tự ý đổi sang fallback seed ngẫu nhiên mới để tránh lỗi Corrupt/Invalid Key
+            if (encryptedPassphraseB64 != null && ivB64 != null) {
+                throw IllegalStateException("Không thể giải mã khóa CSDL từ Android KeyStore: ${e.message}", e)
+            }
+            // Dự phòng cho môi trường kiểm thử JVM / Robolectric không có Android KeyStore phần cứng
             getFallbackPassphrase(context)
         }
     }

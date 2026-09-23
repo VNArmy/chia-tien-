@@ -652,45 +652,36 @@ class TripFinanceRepository(private val db: AppDatabase) {
         return BackupRestoreManager.writeBackupToUri(context, uri, db, password)
     }
 
+    /**
+     * Kiểm tra xem tệp sao lưu tại Uri có được mã hóa bằng mật khẩu hay không.
+     * Tối ưu hóa bộ nhớ: Chỉ đọc tối đa 2KB phần đầu của tệp.
+     */
     fun isEncryptedBackupUri(context: Context, uri: Uri): Boolean {
-        val readResult = BackupRestoreManager.readBackupFromUri(context, uri)
-        return if (readResult.isSuccess) {
-            BackupCryptoUtils.isEncryptedBackup(readResult.getOrThrow())
-        } else false
+        return BackupRestoreManager.isEncryptedBackupUri(context, uri)
     }
 
+    /**
+     * Kiểm tra xem tệp sao lưu File cục bộ có được mã hóa bằng mật khẩu hay không.
+     * Tối ưu hóa bộ nhớ: Chỉ đọc tối đa 2KB phần đầu của tệp.
+     */
     fun isEncryptedBackupFile(file: File): Boolean {
-        return try {
-            val content = file.readText(Charsets.UTF_8)
-            BackupCryptoUtils.isEncryptedBackup(content)
-        } catch (_: Exception) {
-            false
-        }
+        return BackupRestoreManager.isEncryptedBackupFile(file)
     }
 
+    /**
+     * Khôi phục toàn bộ CSDL từ tệp sao lưu Storage Access Framework Uri.
+     * Hỗ trợ streaming JsonReader O(1) Memory với tệp không mã hóa, và giải mã AES-256-GCM an toàn với tệp có mật khẩu.
+     */
     suspend fun restoreBackupFromUri(context: Context, uri: Uri, clearExisting: Boolean = false, password: String? = null): Result<RestoreResult> {
-        val readResult = BackupRestoreManager.readBackupFromUri(context, uri)
-        if (readResult.isFailure) {
-            return Result.failure(readResult.exceptionOrNull() ?: Exception("Không thể đọc tệp sao lưu"))
-        }
-        val parseResult = BackupRestoreManager.parseAndValidateBackup(readResult.getOrThrow(), password)
-        if (parseResult.isFailure) {
-            return Result.failure(parseResult.exceptionOrNull() ?: Exception("Dữ liệu sao lưu không hợp lệ"))
-        }
-        return BackupRestoreManager.restoreFromBackupData(db, parseResult.getOrThrow(), clearExisting)
+        return BackupRestoreManager.restoreFromUriStreaming(context, db, uri, clearExisting, password)
     }
 
+    /**
+     * Khôi phục toàn bộ CSDL từ tệp sao lưu File cục bộ.
+     * Hỗ trợ streaming JsonReader O(1) Memory với tệp không mã hóa, và giải mã AES-256-GCM an toàn với tệp có mật khẩu.
+     */
     suspend fun restoreBackupFromFile(file: File, clearExisting: Boolean = false, password: String? = null): Result<RestoreResult> {
-        return try {
-            val json = file.readText(Charsets.UTF_8)
-            val parseResult = BackupRestoreManager.parseAndValidateBackup(json, password)
-            if (parseResult.isFailure) {
-                return Result.failure(parseResult.exceptionOrNull() ?: Exception("Dữ liệu sao lưu không hợp lệ"))
-            }
-            BackupRestoreManager.restoreFromBackupData(db, parseResult.getOrThrow(), clearExisting)
-        } catch (e: Exception) {
-            Result.failure(e)
-        }
+        return BackupRestoreManager.restoreFromFileStreaming(db, file, clearExisting, password)
     }
 
     fun listLocalBackups(context: Context): List<File> {

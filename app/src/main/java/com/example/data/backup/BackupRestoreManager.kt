@@ -275,6 +275,125 @@ object BackupRestoreManager {
         }
     }
 
+    /**
+     * Kiểm tra nhanh xem tệp File có phải là bản sao lưu mã hóa hay không mà chỉ đọc 2KB đầu tệp.
+     * Đảm bảo không tốn bộ nhớ RAM ngay cả với tệp dung lượng hàng chục MB.
+     */
+    fun isEncryptedBackupFile(file: File): Boolean {
+        return try {
+            file.bufferedReader(Charsets.UTF_8).use { reader ->
+                val buffer = CharArray(2048)
+                val count = reader.read(buffer, 0, buffer.size)
+                if (count > 0) {
+                    val snippet = String(buffer, 0, count)
+                    BackupCryptoUtils.isEncryptedBackupSnippet(snippet)
+                } else false
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /**
+     * Kiểm tra nhanh xem tệp Uri (Storage Access Framework) có phải là bản sao lưu mã hóa hay không mà chỉ đọc 2KB đầu tệp.
+     */
+    fun isEncryptedBackupUri(context: Context, uri: Uri): Boolean {
+        return try {
+            context.contentResolver.openInputStream(uri)?.use { stream ->
+                stream.bufferedReader(Charsets.UTF_8).use { reader ->
+                    val buffer = CharArray(2048)
+                    val count = reader.read(buffer, 0, buffer.size)
+                    if (count > 0) {
+                        val snippet = String(buffer, 0, count)
+                        BackupCryptoUtils.isEncryptedBackupSnippet(snippet)
+                    } else false
+                }
+            } ?: false
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /**
+     * Khôi phục trực tiếp từ tệp cục bộ (File) theo cơ chế Streaming O(1) Memory đối với tệp không mã hóa.
+     */
+    suspend fun restoreFromFileStreaming(
+        db: AppDatabase,
+        file: File,
+        clearExisting: Boolean = false,
+        password: String? = null
+    ): Result<RestoreResult> {
+        return try {
+            val isEncrypted = isEncryptedBackupFile(file)
+            val parseResult: Result<BackupData> = if (isEncrypted) {
+                if (password.isNullOrBlank()) {
+                    return Result.failure(IllegalArgumentException("ENCRYPTED_BACKUP_PASSWORD_REQUIRED"))
+                }
+                val encryptedJson = file.readText(Charsets.UTF_8)
+                val decryptResult = BackupCryptoUtils.decryptBackup(encryptedJson, password)
+                if (decryptResult.isFailure) {
+                    return Result.failure(decryptResult.exceptionOrNull() ?: IllegalArgumentException("Mật khẩu giải mã không chính xác!"))
+                }
+                parseBackupFromReader(java.io.StringReader(decryptResult.getOrThrow()))
+            } else {
+                file.bufferedReader(Charsets.UTF_8).use { reader ->
+                    parseBackupFromReader(reader)
+                }
+            }
+
+            if (parseResult.isFailure) {
+                return Result.failure(parseResult.exceptionOrNull() ?: IllegalArgumentException("Dữ liệu sao lưu không hợp lệ"))
+            }
+
+            restoreFromBackupData(db, parseResult.getOrThrow(), clearExisting)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Khôi phục trực tiếp từ Storage Access Framework Uri theo cơ chế Streaming O(1) Memory đối với tệp không mã hóa.
+     */
+    suspend fun restoreFromUriStreaming(
+        context: Context,
+        db: AppDatabase,
+        uri: Uri,
+        clearExisting: Boolean = false,
+        password: String? = null
+    ): Result<RestoreResult> {
+        return try {
+            val isEncrypted = isEncryptedBackupUri(context, uri)
+            val parseResult: Result<BackupData> = if (isEncrypted) {
+                if (password.isNullOrBlank()) {
+                    return Result.failure(IllegalArgumentException("ENCRYPTED_BACKUP_PASSWORD_REQUIRED"))
+                }
+                val encryptedJson = context.contentResolver.openInputStream(uri)?.use { stream ->
+                    stream.bufferedReader(Charsets.UTF_8).readText()
+                } ?: return Result.failure(IllegalArgumentException("Không thể mở tệp từ hệ thống"))
+
+                val decryptResult = BackupCryptoUtils.decryptBackup(encryptedJson, password)
+                if (decryptResult.isFailure) {
+                    return Result.failure(decryptResult.exceptionOrNull() ?: IllegalArgumentException("Mật khẩu giải mã không chính xác!"))
+                }
+                parseBackupFromReader(java.io.StringReader(decryptResult.getOrThrow()))
+            } else {
+                context.contentResolver.openInputStream(uri)?.use { stream ->
+                    stream.bufferedReader(Charsets.UTF_8).use { reader ->
+                        parseBackupFromReader(reader)
+                    }
+                } ?: return Result.failure(IllegalArgumentException("Không thể mở tệp từ hệ thống"))
+            }
+
+            if (parseResult.isFailure) {
+                return Result.failure(parseResult.exceptionOrNull() ?: IllegalArgumentException("Dữ liệu sao lưu không hợp lệ"))
+            }
+
+            restoreFromBackupData(db, parseResult.getOrThrow(), clearExisting)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
     fun parseAndValidateBackup(jsonString: String, password: String? = null): Result<BackupData> {
         return try {
             val decryptedJson = if (BackupCryptoUtils.isEncryptedBackup(jsonString)) {
