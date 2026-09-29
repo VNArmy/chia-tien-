@@ -47,7 +47,30 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             TripFinanceTheme {
-                TripFinanceApp(viewModel = viewModel)
+                val dbState by viewModel.databaseInitState.collectAsStateWithLifecycle()
+                when (val state = dbState) {
+                    is com.example.ui.viewmodel.DatabaseInitState.Initializing -> {
+                        Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            CircularProgressIndicator(color = EmeraldPrimary)
+                        }
+                    }
+                    is com.example.ui.viewmodel.DatabaseInitState.Error -> {
+                        EmergencyDatabaseRecoveryScreen(
+                            error = state,
+                            onRetry = { viewModel.retryDatabaseInit() },
+                            onRestoreBackup = { json, password ->
+                                viewModel.restoreFromEmergencyBackup(json, password)
+                            },
+                            onResetFresh = { viewModel.resetDatabaseFresh() }
+                        )
+                    }
+                    is com.example.ui.viewmodel.DatabaseInitState.Ready -> {
+                        TripFinanceApp(viewModel = viewModel)
+                    }
+                }
             }
         }
     }

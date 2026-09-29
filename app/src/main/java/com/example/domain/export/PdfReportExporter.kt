@@ -17,6 +17,7 @@ import com.example.data.entity.TripMemberEntity
 import com.example.domain.model.FinancialSummary
 import com.example.domain.model.MemberFinancialStatus
 import com.example.domain.model.SettlementTransfer
+import com.example.domain.model.sumOfSafe
 import com.example.ui.components.NumberFormatUtils
 import java.io.File
 import java.io.FileOutputStream
@@ -238,7 +239,7 @@ object PdfReportExporter {
             // =========================================================================
             // Section 3: KẾ HOẠCH QUYẾT TOÁN TỐI ƯU CHUYỂN KHOẢN GIỮA CÁC THÀNH VIÊN
             // =========================================================================
-            val totalTransferAmount = settlementTransfers.sumOf { it.amount }
+            val totalTransferAmount = settlementTransfers.sumOfSafe { it.amount }
             checkPageBreak(50f + if (settlementTransfers.isEmpty()) 40f else (settlementTransfers.size * 22f + 30f))
             
             paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)

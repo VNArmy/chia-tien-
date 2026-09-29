@@ -43,6 +43,7 @@ fun CreateTripDialog(
     var title by remember { mutableStateOf("") }
     var description by remember { mutableStateOf("") }
     var adminName by remember { mutableStateOf("") }
+    var joinCodeInput by remember { mutableStateOf(com.example.domain.model.TripCodeGenerator.generateCode("TRIP-")) }
     var adminBankName by remember { mutableStateOf("Vietcombank") }
     var adminBankAccount by remember { mutableStateOf("") }
 
@@ -98,6 +99,25 @@ fun CreateTripDialog(
                 )
 
                 OutlinedTextField(
+                    value = joinCodeInput,
+                    onValueChange = { input ->
+                        val filtered = input.uppercase().filter { it.isLetterOrDigit() || it == '-' || it == '_' }
+                        if (filtered.length <= 16) joinCodeInput = filtered
+                    },
+                    label = { Text("Mã đoàn (Dùng để chia sẻ / nhập đoàn)") },
+                    singleLine = true,
+                    trailingIcon = {
+                        IconButton(onClick = {
+                            joinCodeInput = com.example.domain.model.TripCodeGenerator.generateCode("TRIP-")
+                        }) {
+                            Icon(Icons.Filled.Edit, contentDescription = "Tạo mã ngẫu nhiên mới", tint = EmeraldPrimary)
+                        }
+                    },
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                OutlinedTextField(
                     value = adminBankName,
                     onValueChange = { adminBankName = it },
                     label = { Text("Ngân hàng nhận tiền quyết toán") },
@@ -126,11 +146,13 @@ fun CreateTripDialog(
                     focusManager.clearFocus()
                     keyboardController?.hide()
                     val now = System.currentTimeMillis()
-                    val autoCode = "LOCAL_${System.currentTimeMillis() % 10000}"
+                    val finalCode = joinCodeInput.trim().ifEmpty {
+                        com.example.domain.model.TripCodeGenerator.generateCode("TRIP-")
+                    }
                     onConfirm(
                         title.trim(),
                         description.trim(),
-                        autoCode,
+                        finalCode,
                         now,
                         now + 86400000L * 5,
                         adminName.trim(),

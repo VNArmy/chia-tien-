@@ -38,6 +38,10 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.DialogProperties
 import com.example.data.entity.ExchangeRateEntity
 import com.example.data.entity.TripMemberEntity
+import com.example.domain.model.FinancialInputValidator
+import com.example.domain.model.AmountValidationResult
+import com.example.domain.model.RateValidationResult
+import com.example.domain.model.sumOfSafe
 import com.example.domain.engine.SplitCalculator
 import com.example.domain.model.DefaultExchangeRates
 import com.example.ui.components.CategoryIcon
@@ -205,9 +209,17 @@ fun AddExpenseDialog(
         }
     }
 
-    val parsedAmount = amountText.trim().replace(',', '.').toDoubleOrNull() ?: 0.0
-    val parsedRate = exchangeRateText.trim().replace(',', '.').toDoubleOrNull() ?: 1.0
-    val convertedTotalVnd = kotlin.math.round(parsedAmount * parsedRate).toLong()
+    val amountValidation = FinancialInputValidator.parseAmount(amountText, selectedCurrency)
+    val rateValidation = FinancialInputValidator.parseRate(exchangeRateText, selectedCurrency)
+
+    val parsedAmount = (amountValidation as? AmountValidationResult.Success)?.amount ?: 0.0
+    val parsedRate = (rateValidation as? RateValidationResult.Success)?.rate ?: 0.0
+    val isAmountValid = amountValidation is AmountValidationResult.Success
+    val isRateValid = rateValidation is RateValidationResult.Success
+
+    val convertedTotalVnd = if (isAmountValid && isRateValid) {
+        FinancialInputValidator.convertToVnd(parsedAmount, parsedRate)
+    } else 0L
 
     // Compute live splits based on selected splitType
     val calculatedSplits: List<Pair<String, Long>> = remember(
@@ -255,13 +267,15 @@ fun AddExpenseDialog(
         abs(totalRatio - 100.0) <= 0.01
     }
 
-    val currentAllocatedSum = calculatedSplits.sumOf { it.second }
+    val currentAllocatedSum = calculatedSplits.sumOfSafe { it.second }
     val hasNoNegativeSplits = calculatedSplits.isNotEmpty() && calculatedSplits.all { it.second >= 0L }
     val isAllocationExact = convertedTotalVnd > 0 && currentAllocatedSum == convertedTotalVnd && (splitType != "RATIO" || isRatioValid)
     val diff = convertedTotalVnd - currentAllocatedSum
 
     val isPayerValid = payerType == "FUND" || selectedPayerMemberId.isNotBlank()
     val isFormValid = title.isNotBlank() &&
+            isAmountValid &&
+            isRateValid &&
             convertedTotalVnd > 0 &&
             isAllocationExact &&
             hasNoNegativeSplits &&
@@ -399,15 +413,26 @@ fun AddExpenseDialog(
                                 value = amountText,
                                 onValueChange = { input ->
                                     val trimmed = input.trim()
-                                    val sepCount = trimmed.count { it == '.' || it == ',' }
-                                    if (sepCount <= 1 && trimmed.all { it.isDigit() || it == '.' || it == ',' }) {
-                                        amountText = trimmed
+                                    if (selectedCurrency == "VND") {
+                                        if (trimmed.all { it.isDigit() || it == '.' || it == ',' || it == ' ' }) {
+                                            amountText = trimmed
+                                        }
+                                    } else {
+                                        if (trimmed.all { it.isDigit() || it == '.' || it == ',' || it == ' ' }) {
+                                            amountText = trimmed
+                                        }
+                                    }
+                                },
+                                isError = amountText.isNotEmpty() && !isAmountValid,
+                                supportingText = {
+                                    if (amountText.isNotEmpty() && amountValidation is AmountValidationResult.Error) {
+                                        Text(amountValidation.message, color = DangerRed, fontSize = 11.sp)
                                     }
                                 },
                                 label = { Text("Số tiền *") },
                                 placeholder = { Text(if (selectedCurrency == "VND") "0" else "0.00") },
                                 keyboardOptions = KeyboardOptions(
-                                    keyboardType = KeyboardType.Decimal,
+                                    keyboardType = if (selectedCurrency == "VND") KeyboardType.Number else KeyboardType.Decimal,
                                     imeAction = ImeAction.Next
                                 ),
                                 modifier = Modifier
@@ -477,9 +502,10 @@ fun AddExpenseDialog(
                             ).forEach { (addVal, label) ->
                                 SuggestionChip(
                                     onClick = {
-                                        val current = amountText.trim().replace(',', '.').toDoubleOrNull() ?: 0.0
+                                        val parsed = FinancialInputValidator.parseAmount(amountText, selectedCurrency)
+                                        val current = (parsed as? AmountValidationResult.Success)?.amount ?: 0.0
                                         val updated = current + addVal
-                                        amountText = if (updated % 1.0 == 0.0) updated.toLong().toString() else updated.toString()
+                                        amountText = if (selectedCurrency == "VND" || updated % 1.0 == 0.0) updated.toLong().toString() else updated.toString()
                                     },
                                     label = { Text(label, fontSize = 11.sp) }
                                 )
@@ -504,6 +530,12 @@ fun AddExpenseDialog(
                                     OutlinedTextField(
                                         value = exchangeRateText,
                                         onValueChange = { exchangeRateText = it },
+                                        isError = exchangeRateText.isNotEmpty() && !isRateValid,
+                                        supportingText = {
+                                            if (exchangeRateText.isNotEmpty() && rateValidation is RateValidationResult.Error) {
+                                                Text(rateValidation.message, color = Color(0xFFDC2626), fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                                            }
+                                        },
                                         label = {
                                             Text(
                                                 "Tỷ giá quy đổi (1 $selectedCurrency = ? VND)",

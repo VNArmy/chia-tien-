@@ -4,6 +4,7 @@ import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
 import androidx.room.PrimaryKey
+import com.example.domain.model.FinancialLimits
 
 @Entity(
     tableName = "trips",
@@ -112,9 +113,13 @@ data class ExpenseEntity(
 ) {
     init {
         require(title.isNotBlank()) { "Expense title cannot be blank" }
-        require(totalAmount >= 0.0) { "Total expense amount cannot be negative ($totalAmount)" }
-        require(exchangeRate > 0.0) { "Exchange rate must be greater than 0 ($exchangeRate)" }
-        require(convertedTotalAmount >= 0) { "Converted total amount cannot be negative ($convertedTotalAmount)" }
+        require(totalAmount.isFinite() && !totalAmount.isNaN() && totalAmount >= 0.0) { "Total expense amount must be a finite non-negative number ($totalAmount)" }
+        require(totalAmount <= FinancialLimits.MAX_TRANSACTION_AMOUNT) { "Total expense amount exceeds limit ($totalAmount)" }
+        if (currency.equals("VND", ignoreCase = true)) {
+            require(totalAmount % 1.0 == 0.0) { "Tiền VND không được có số thập phân ($totalAmount)" }
+        }
+        require(exchangeRate.isFinite() && !exchangeRate.isNaN() && exchangeRate > 0.0 && exchangeRate <= FinancialLimits.MAX_EXCHANGE_RATE) { "Exchange rate must be a valid positive number ($exchangeRate)" }
+        require(convertedTotalAmount >= 0L && convertedTotalAmount <= FinancialLimits.MAX_TRANSACTION_AMOUNT) { "Converted total amount cannot be negative or exceed limit ($convertedTotalAmount)" }
     }
 }
 
@@ -155,9 +160,9 @@ data class ExpenseSplitEntity(
     val percentage: Double? = null
 ) {
     init {
-        require(amount >= 0) { "Split amount cannot be negative ($amount)" }
+        require(amount >= 0L && amount <= FinancialLimits.MAX_TRANSACTION_AMOUNT) { "Split amount cannot be negative or exceed limit ($amount)" }
         if (percentage != null) {
-            require(percentage >= 0.0) { "Split percentage cannot be negative ($percentage)" }
+            require(percentage.isFinite() && !percentage.isNaN() && percentage >= 0.0 && percentage <= 100.0) { "Split percentage must be between 0 and 100 ($percentage)" }
         }
     }
 }
@@ -203,9 +208,9 @@ data class FundContributionEntity(
     val recordedByMemberId: String
 ) {
     init {
-        require(amount >= 0) { "Fund contribution amount cannot be negative ($amount)" }
-        require(exchangeRate > 0.0) { "Exchange rate must be greater than 0 ($exchangeRate)" }
-        require(convertedAmount >= 0) { "Converted fund amount cannot be negative ($convertedAmount)" }
+        require(amount >= 0L && amount <= FinancialLimits.MAX_TRANSACTION_AMOUNT) { "Fund contribution amount cannot be negative or exceed limit ($amount)" }
+        require(exchangeRate.isFinite() && !exchangeRate.isNaN() && exchangeRate > 0.0 && exchangeRate <= FinancialLimits.MAX_EXCHANGE_RATE) { "Exchange rate must be a valid positive number ($exchangeRate)" }
+        require(convertedAmount >= 0L && convertedAmount <= FinancialLimits.MAX_TRANSACTION_AMOUNT) { "Converted fund amount cannot be negative or exceed limit ($convertedAmount)" }
     }
 }
 
@@ -233,7 +238,7 @@ data class ExchangeRateEntity(
 ) {
     init {
         require(currencyCode.isNotBlank()) { "Currency code cannot be blank" }
-        require(rateToBase > 0.0) { "Exchange rate to base currency must be greater than 0 ($rateToBase)" }
+        require(rateToBase.isFinite() && !rateToBase.isNaN() && rateToBase > 0.0 && rateToBase <= FinancialLimits.MAX_EXCHANGE_RATE) { "Exchange rate to base currency must be a valid positive number ($rateToBase)" }
     }
 }
 
@@ -263,9 +268,9 @@ data class SettlementSnapshotEntity(
     val settlementJson: String // Full serialized audit snapshot
 ) {
     init {
-        require(totalExpenses >= 0) { "Total expenses cannot be negative ($totalExpenses)" }
-        require(totalFundCollected >= 0) { "Total fund collected cannot be negative ($totalFundCollected)" }
-        require(totalFundSpent >= 0) { "Total fund spent cannot be negative ($totalFundSpent)" }
+        require(totalExpenses >= 0L && totalExpenses <= FinancialLimits.MAX_TRANSACTION_AMOUNT) { "Total expenses cannot be negative or exceed limit ($totalExpenses)" }
+        require(totalFundCollected >= 0L && totalFundCollected <= FinancialLimits.MAX_TRANSACTION_AMOUNT) { "Total fund collected cannot be negative or exceed limit ($totalFundCollected)" }
+        require(totalFundSpent >= 0L && totalFundSpent <= FinancialLimits.MAX_TRANSACTION_AMOUNT) { "Total fund spent cannot be negative or exceed limit ($totalFundSpent)" }
     }
 }
 

@@ -53,7 +53,7 @@ fun BackupRestoreDialog(
     // Encryption states for backup creation & export
     var showCreateOptionsDialog by remember { mutableStateOf(false) }
     var isCreateExportMode by remember { mutableStateOf(false) }
-    var encryptBackupCheck by remember { mutableStateOf(false) }
+    var encryptBackupCheck by remember { mutableStateOf(true) }
     var backupPasswordField by remember { mutableStateOf("") }
     var backupPasswordVisible by remember { mutableStateOf(false) }
     var activeExportPassword by remember { mutableStateOf<String?>(null) }
@@ -62,6 +62,10 @@ fun BackupRestoreDialog(
     var isPendingEncrypted by remember { mutableStateOf(false) }
     var restorePasswordField by remember { mutableStateOf("") }
     var restorePasswordVisible by remember { mutableStateOf(false) }
+
+    // Share warning for unencrypted backup
+    var pendingShareFile by remember { mutableStateOf<File?>(null) }
+    var showShareWarningDialog by remember { mutableStateOf(false) }
 
     // Launcher for exporting backup to a user-selected URI (SAF)
     val exportDocumentLauncher = rememberLauncherForActivityResult(
@@ -187,7 +191,7 @@ fun BackupRestoreDialog(
                     Button(
                         onClick = {
                             isCreateExportMode = false
-                            encryptBackupCheck = false
+                            encryptBackupCheck = true
                             backupPasswordField = ""
                             showCreateOptionsDialog = true
                         },
@@ -204,7 +208,7 @@ fun BackupRestoreDialog(
                     OutlinedButton(
                         onClick = {
                             isCreateExportMode = true
-                            encryptBackupCheck = false
+                            encryptBackupCheck = true
                             backupPasswordField = ""
                             showCreateOptionsDialog = true
                         },
@@ -339,7 +343,14 @@ fun BackupRestoreDialog(
                                     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                                         // Share
                                         IconButton(
-                                            onClick = { viewModel.shareBackupFile(context, file) },
+                                            onClick = {
+                                                if (isEncrypted) {
+                                                    viewModel.shareBackupFile(context, file)
+                                                } else {
+                                                    pendingShareFile = file
+                                                    showShareWarningDialog = true
+                                                }
+                                            },
                                             modifier = Modifier.size(36.dp)
                                         ) {
                                             Icon(
@@ -457,9 +468,15 @@ fun BackupRestoreDialog(
                                 OutlinedTextField(
                                     value = backupPasswordField,
                                     onValueChange = { backupPasswordField = it },
-                                    label = { Text("Mật khẩu bảo vệ sao lưu", fontSize = 12.sp) },
-                                    placeholder = { Text("Nhập mật khẩu tự chọn", fontSize = 11.sp) },
+                                    label = { Text("Mật khẩu bảo vệ sao lưu (tối thiểu 6 ký tự)", fontSize = 12.sp) },
+                                    placeholder = { Text("Nhập mật khẩu tự chọn (>= 6 ký tự)", fontSize = 11.sp) },
                                     singleLine = true,
+                                    isError = backupPasswordField.isNotEmpty() && backupPasswordField.length < 6,
+                                    supportingText = {
+                                        if (backupPasswordField.isNotEmpty() && backupPasswordField.length < 6) {
+                                            Text("Mật khẩu phải có tối thiểu 6 ký tự", color = Color(0xFFDC2626), fontSize = 11.sp)
+                                        }
+                                    },
                                     visualTransformation = if (backupPasswordVisible) VisualTransformation.None else PasswordVisualTransformation(),
                                     trailingIcon = {
                                         IconButton(onClick = { backupPasswordVisible = !backupPasswordVisible }) {
@@ -472,13 +489,28 @@ fun BackupRestoreDialog(
                                     },
                                     modifier = Modifier.fillMaxWidth()
                                 )
+                            } else {
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Surface(
+                                    color = Color(0xFFFEF3C7),
+                                    shape = RoundedCornerShape(8.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(
+                                        "Cảnh báo: Bản sao lưu không mã hóa sẽ tự động ẩn số tài khoản ngân hàng (******1234) để bảo vệ an toàn khi chia sẻ qua mạng.",
+                                        color = Color(0xFF92400E),
+                                        fontSize = 11.sp,
+                                        modifier = Modifier.padding(8.dp),
+                                        lineHeight = 15.sp
+                                    )
+                                }
                             }
                         }
                     }
                 }
             },
             confirmButton = {
-                val isConfirmEnabled = !encryptBackupCheck || backupPasswordField.isNotBlank()
+                val isConfirmEnabled = !encryptBackupCheck || backupPasswordField.trim().length >= 6
                 Button(
                     onClick = {
                         showCreateOptionsDialog = false
@@ -508,7 +540,7 @@ fun BackupRestoreDialog(
     // Confirmation dialog before restoring
     if (showConfirmRestoreDialog) {
         val targetName = pendingRestoreFile?.name ?: pendingRestoreUri?.lastPathSegment ?: "Tệp sao lưu"
-        val canConfirm = !isPendingEncrypted || restorePasswordField.isNotBlank()
+        val canConfirm = !isPendingEncrypted || restorePasswordField.trim().length >= 6
 
         AlertDialog(
             onDismissRequest = { showConfirmRestoreDialog = false },
@@ -553,8 +585,14 @@ fun BackupRestoreDialog(
                         OutlinedTextField(
                             value = restorePasswordField,
                             onValueChange = { restorePasswordField = it },
-                            label = { Text("Mật khẩu giải mã", fontSize = 12.sp) },
+                            label = { Text("Mật khẩu giải mã (tối thiểu 6 ký tự)", fontSize = 12.sp) },
                             singleLine = true,
+                            isError = restorePasswordField.isNotEmpty() && restorePasswordField.trim().length < 6,
+                            supportingText = {
+                                if (restorePasswordField.isNotEmpty() && restorePasswordField.trim().length < 6) {
+                                    Text("Mật khẩu phải có tối thiểu 6 ký tự", color = Color(0xFFDC2626), fontSize = 11.sp)
+                                }
+                            },
                             visualTransformation = if (restorePasswordVisible) VisualTransformation.None else PasswordVisualTransformation(),
                             trailingIcon = {
                                 IconButton(onClick = { restorePasswordVisible = !restorePasswordVisible }) {
@@ -607,6 +645,76 @@ fun BackupRestoreDialog(
             },
             dismissButton = {
                 OutlinedButton(onClick = { showConfirmRestoreDialog = false }) {
+                    Text("Hủy bỏ")
+                }
+            }
+        )
+    }
+
+    // Warning dialog when sharing unencrypted backup file
+    if (showShareWarningDialog && pendingShareFile != null) {
+        val fileToShare = pendingShareFile!!
+        AlertDialog(
+            onDismissRequest = {
+                showShareWarningDialog = false
+                pendingShareFile = null
+            },
+            icon = {
+                Icon(
+                    Icons.Filled.Warning,
+                    contentDescription = null,
+                    tint = Color(0xFFD97706)
+                )
+            },
+            title = {
+                Text("Chia Sẻ Bản Sao Lưu Không Mã Hóa", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "Tệp '${fileToShare.name}' không được bảo vệ bằng mật khẩu mã hóa.",
+                        fontSize = 12.5.sp,
+                        color = Color(0xFF1E293B)
+                    )
+                    Surface(
+                        color = Color(0xFFFEF3C7),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            "Lưu ý an toàn: Để bảo vệ tài chính cá nhân của các thành viên đoàn, hệ thống đã tự động che mờ số tài khoản ngân hàng (dạng ******1234) trong tệp không mã hóa này.",
+                            color = Color(0xFF92400E),
+                            fontSize = 11.sp,
+                            modifier = Modifier.padding(10.dp),
+                            lineHeight = 15.sp
+                        )
+                    }
+                    Text(
+                        "Bạn có muốn tiếp tục gửi tệp này qua ứng dụng khác không?",
+                        fontSize = 12.sp,
+                        color = Color(0xFF475569)
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showShareWarningDialog = false
+                        viewModel.shareBackupFile(context, fileToShare)
+                        pendingShareFile = null
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary)
+                ) {
+                    Text("Tiếp tục chia sẻ")
+                }
+            },
+            dismissButton = {
+                OutlinedButton(
+                    onClick = {
+                        showShareWarningDialog = false
+                        pendingShareFile = null
+                    }
+                ) {
                     Text("Hủy bỏ")
                 }
             }

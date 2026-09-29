@@ -170,7 +170,7 @@ fun SettlementScreen(
                             if (!isSettled) {
                                 Button(
                                     onClick = { showFinalizeDialog = true },
-                                    enabled = isAdmin && isBalanced,
+                                    enabled = isAdmin && isBalanced && uiState.members.isNotEmpty() && uiState.financialSummary.balanceDiscrepancy == 0L,
                                     colors = ButtonDefaults.buttonColors(containerColor = IndigoSecondary),
                                     shape = RoundedCornerShape(10.dp),
                                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
@@ -200,12 +200,15 @@ fun SettlementScreen(
                             Spacer(modifier = Modifier.height(4.dp))
                             Text("• Chỉ Trưởng đoàn (Admin) mới có quyền khóa sổ chuyến đi", fontSize = 10.sp, color = Color(0xFFEF4444))
                         }
-                        if (!isBalanced) {
+                        if (uiState.members.isEmpty()) {
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text("• Đoàn chưa có thành viên nào. Không thể khóa sổ!", fontSize = 10.sp, color = Color(0xFFEF4444))
+                        } else if (!isBalanced || uiState.financialSummary.balanceDiscrepancy != 0L) {
                             Spacer(modifier = Modifier.height(4.dp))
                             val msg = if (uiState.financialSummary.balanceDiscrepancy > 0) {
-                                "• Hệ thống phát hiện chênh lệch đối soát (${NumberFormatUtils.formatVnd(uiState.financialSummary.balanceDiscrepancy)}). Khoản chi phân bổ chưa đủ hoặc có sai lệch dữ liệu. Không thể khóa sổ!"
+                                "• Phát hiện chênh lệch đối soát (${NumberFormatUtils.formatVnd(uiState.financialSummary.balanceDiscrepancy)}). Khoản chi phân bổ chưa đủ hoặc có sai lệch dữ liệu. Không thể khóa sổ!"
                             } else {
-                                "• Tổng số dư đoàn bị lệch hoặc chưa có thành viên. Không thể khóa sổ!"
+                                "• Tổng số dư đoàn bị lệch hoặc dữ liệu chưa hợp lệ. Không thể khóa sổ!"
                             }
                             Text(msg, fontSize = 10.sp, color = Color(0xFFEF4444))
                         }
@@ -653,14 +656,106 @@ fun SettlementScreen(
 
     // Snapshot View Dialog
     selectedSnapshotForView?.let { snap ->
+        val parsedJson = remember(snap.settlementJson) {
+            try {
+                org.json.JSONObject(snap.settlementJson)
+            } catch (_: Exception) {
+                null
+            }
+        }
+
         AlertDialog(
             onDismissRequest = { selectedSnapshotForView = null },
             properties = DialogProperties(decorFitsSystemWindows = true),
-            title = { Text(snap.snapshotTitle, fontSize = 16.sp, fontWeight = FontWeight.Bold) },
+            title = {
+                Column {
+                    Text(snap.snapshotTitle, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                    val dateFormatted = remember(snap.createdAt) {
+                        java.text.SimpleDateFormat("dd/MM/yyyy HH:mm", java.util.Locale("vi", "VN")).format(java.util.Date(snap.createdAt))
+                    }
+                    Text("Niêm phong lúc: $dateFormatted", fontSize = 11.sp, color = Color(0xFF64748B))
+                }
+            },
             text = {
-                LazyColumn(modifier = Modifier.heightIn(max = 400.dp)) {
-                    item {
-                        Text(snap.settlementJson, fontSize = 12.sp, color = Color(0xFF1E293B))
+                LazyColumn(
+                    modifier = Modifier.heightIn(max = 450.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    if (parsedJson != null) {
+                        item {
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = Color(0xFFF8FAFC),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFE2E8F0)),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Text("TỔNG QUAN TÀI CHÍNH NIÊM PHONG", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = Color(0xFF475569))
+                                    Text("• Tổng chi tiêu: ${NumberFormatUtils.formatVnd(snap.totalExpenses)}", fontSize = 12.sp)
+                                    Text("• Tổng quỹ đã thu: ${NumberFormatUtils.formatVnd(snap.totalFundCollected)}", fontSize = 12.sp)
+                                    Text("• Quỹ đã chi: ${NumberFormatUtils.formatVnd(snap.totalFundSpent)}", fontSize = 12.sp)
+                                    Text("• Quỹ còn lại: ${NumberFormatUtils.formatVnd(snap.remainingFund)}", fontSize = 12.sp)
+                                }
+                            }
+                        }
+
+                        val membersArray = parsedJson.optJSONArray("members")
+                        if (membersArray != null && membersArray.length() > 0) {
+                            item {
+                                Text("SỐ DƯ TỪNG THÀNH VIÊN", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = Color(0xFF1E293B))
+                            }
+                            items(membersArray.length()) { idx ->
+                                val memObj = membersArray.getJSONObject(idx)
+                                val name = memObj.optString("name", "TV")
+                                val role = memObj.optString("role", "MEMBER")
+                                val balance = memObj.optLong("balance", 0L)
+                                val balText = if (balance > 0) "+${NumberFormatUtils.formatVnd(balance)} (Nhận lại)"
+                                    else if (balance < 0) "${NumberFormatUtils.formatVnd(balance)} (Cần nộp)"
+                                    else "0 đ (Đã cân bằng)"
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text("$name ($role)", fontSize = 11.5.sp, color = Color(0xFF334155))
+                                    Text(
+                                        balText,
+                                        fontSize = 11.5.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = if (balance > 0) EmeraldPrimary else if (balance < 0) Color(0xFFEF4444) else Color(0xFF64748B)
+                                    )
+                                }
+                            }
+                        }
+
+                        val transfersArray = parsedJson.optJSONArray("transfers")
+                        if (transfersArray != null && transfersArray.length() > 0) {
+                            item {
+                                Text("KẾ HOẠCH CHUYỂN KHOẢN QUYẾT TOÁN", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = Color(0xFF1E293B))
+                            }
+                            items(transfersArray.length()) { idx ->
+                                val trObj = transfersArray.getJSONObject(idx)
+                                val from = trObj.optString("fromMemberName")
+                                val to = trObj.optString("toMemberName")
+                                val amount = trObj.optLong("amount", 0L)
+                                val note = trObj.optString("transferNote")
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = Color(0xFFEFF6FF),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Column(modifier = Modifier.padding(8.dp)) {
+                                        Text("$from ➔ $to: ${NumberFormatUtils.formatVnd(amount)}", fontWeight = FontWeight.Bold, fontSize = 11.5.sp, color = Color(0xFF1E40AF))
+                                        if (note.isNotBlank()) {
+                                            Text("Nội dung: $note", fontSize = 10.5.sp, color = Color(0xFF3B82F6))
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        item {
+                            Text(snap.settlementJson, fontSize = 12.sp, color = Color(0xFF1E293B))
+                        }
                     }
                 }
             },

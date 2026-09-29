@@ -28,6 +28,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.DialogProperties
 import com.example.data.entity.TripMemberEntity
+import com.example.domain.model.FinancialInputValidator
+import com.example.domain.model.AmountValidationResult
 import com.example.ui.components.NumberFormatUtils
 import com.example.ui.theme.*
 import com.example.ui.viewmodel.UiState
@@ -333,8 +335,10 @@ fun AddFundContributionDialog(
     var note by remember { mutableStateOf("Đóng quỹ đợt 1") }
     var selectedCurrency by remember { mutableStateOf("VND") }
 
-    val parsedAmount = amountText.toLongOrNull() ?: 0L
-    val isValid = selectedMemberId.isNotBlank() && parsedAmount > 0
+    val amountValidation = FinancialInputValidator.parseAmount(amountText, "VND")
+    val parsedAmount = (amountValidation as? AmountValidationResult.Success)?.amount?.toLong() ?: 0L
+    val isAmountValid = amountValidation is AmountValidationResult.Success && parsedAmount > 0L
+    val isValid = selectedMemberId.isNotBlank() && isAmountValid
 
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
@@ -375,7 +379,13 @@ fun AddFundContributionDialog(
 
                 OutlinedTextField(
                     value = amountText,
-                    onValueChange = { if (it.all { c -> c.isDigit() }) amountText = it },
+                    onValueChange = { if (it.all { c -> c.isDigit() || c == '.' || c == ',' || c == ' ' }) amountText = it },
+                    isError = amountText.isNotEmpty() && !isAmountValid,
+                    supportingText = {
+                        if (amountText.isNotEmpty() && amountValidation is AmountValidationResult.Error) {
+                            Text(amountValidation.message, color = DangerRed, fontSize = 11.sp)
+                        }
+                    },
                     label = { Text("Số tiền nộp (VND)") },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Next),
                     modifier = Modifier
