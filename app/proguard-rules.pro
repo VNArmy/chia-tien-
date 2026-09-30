@@ -7,7 +7,7 @@
 # Room Database persistence: Keep database class and entity fields/constructors for SQLite mapping
 -keep class * extends androidx.room.RoomDatabase
 -dontwarn androidx.room.paging.**
--keepclassmembers class com.example.data.entity.** {
+-keepclassmembers class com.hiepnguyen.tripfinance.data.entity.** {
     <fields>;
     <init>(...);
 }

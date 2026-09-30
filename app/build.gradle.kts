@@ -8,11 +8,11 @@ plugins {
 }
 
 android {
-  namespace = "com.example"
+  namespace = "com.hiepnguyen.tripfinance"
   compileSdk { version = release(36) { minorApiLevel = 1 } }
 
   defaultConfig {
-    applicationId = "com.aistudio.tripfinance.vszupq"
+    applicationId = "com.hiepnguyen.tripfinance"
     minSdk = 24
     targetSdk = 36
     versionCode = 19
