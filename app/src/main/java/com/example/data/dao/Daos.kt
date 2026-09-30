@@ -21,14 +21,20 @@ interface TripDao {
     @Query("SELECT * FROM trips WHERE joinCode = :code LIMIT 1")
     suspend fun getTripByJoinCode(code: String): TripEntity?
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insertTrip(trip: TripEntity)
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insertTrips(trips: List<TripEntity>)
 
     @Update
     suspend fun updateTrip(trip: TripEntity)
+
+    @Query("UPDATE trips SET isSettled = 1, settledAt = :settledAt, version = version + 1 WHERE id = :tripId AND version = :expectedVersion AND isSettled = 0")
+    suspend fun lockSettlementWithOptimisticLock(tripId: String, expectedVersion: Long, settledAt: Long): Int
+
+    @Query("UPDATE trips SET isSettled = 0, settledAt = NULL, version = version + 1 WHERE id = :tripId AND version = :expectedVersion AND isSettled = 1")
+    suspend fun reopenSettlementWithOptimisticLock(tripId: String, expectedVersion: Long): Int
 
     @Query("DELETE FROM trips WHERE id = :tripId")
     suspend fun deleteTripById(tripId: String)
@@ -103,11 +109,17 @@ interface ExpenseDao {
     @Query("SELECT * FROM expense_splits WHERE tripId = :tripId")
     fun getAllSplitsByTrip(tripId: String): Flow<List<ExpenseSplitEntity>>
 
+    @Query("SELECT * FROM expense_splits WHERE tripId = :tripId")
+    suspend fun getAllSplitsByTripOnce(tripId: String): List<ExpenseSplitEntity>
+
     @Query("SELECT * FROM expense_splits WHERE expenseId = :expenseId")
     fun getSplitsByExpense(expenseId: String): Flow<List<ExpenseSplitEntity>>
 
     @Query("SELECT * FROM expense_splits WHERE expenseId = :expenseId")
     suspend fun getSplitsByExpenseOnce(expenseId: String): List<ExpenseSplitEntity>
+
+    @Query("SELECT * FROM expense_splits WHERE id = :splitId LIMIT 1")
+    suspend fun getSplitById(splitId: String): ExpenseSplitEntity?
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertSplits(splits: List<ExpenseSplitEntity>)
@@ -158,6 +170,9 @@ interface FundDao {
     @Query("SELECT * FROM fund_contributions WHERE tripId = :tripId ORDER BY timestamp DESC")
     suspend fun getFundContributionsOnce(tripId: String): List<FundContributionEntity>
 
+    @Query("SELECT * FROM fund_contributions WHERE id = :fundId LIMIT 1")
+    suspend fun getFundById(fundId: String): FundContributionEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertFundContribution(contribution: FundContributionEntity)
 
@@ -203,6 +218,9 @@ interface SettlementDao {
     @Query("SELECT * FROM settlement_snapshots WHERE tripId = :tripId ORDER BY createdAt DESC")
     fun getSnapshotsByTrip(tripId: String): Flow<List<SettlementSnapshotEntity>>
 
+    @Query("SELECT * FROM settlement_snapshots WHERE id = :snapshotId LIMIT 1")
+    suspend fun getSnapshotById(snapshotId: String): SettlementSnapshotEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertSnapshot(snapshot: SettlementSnapshotEntity)
 
@@ -223,6 +241,9 @@ interface AuditLogDao {
 
     @Query("SELECT * FROM audit_logs WHERE tripId = :tripId ORDER BY timestamp DESC")
     fun getAuditLogsByTrip(tripId: String): Flow<List<AuditLogEntity>>
+
+    @Query("SELECT * FROM audit_logs WHERE id = :logId LIMIT 1")
+    suspend fun getLogById(logId: String): AuditLogEntity?
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertLog(log: AuditLogEntity)

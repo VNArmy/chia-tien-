@@ -24,7 +24,7 @@ import java.util.UUID
 data class BackupMetadata(
     val appName: String = "TripFinance",
     val backupVersion: Int = 1,
-    val schemaVersion: Int = 3,
+    val schemaVersion: Int = 4,
     val createdAt: Long = System.currentTimeMillis(),
     val createdAtFormatted: String = "",
     val totalTrips: Int = 0,
@@ -34,19 +34,20 @@ data class BackupMetadata(
     val totalFunds: Int = 0,
     val totalRates: Int = 0,
     val totalSnapshots: Int = 0,
-    val totalLogs: Int = 0
+    val totalLogs: Int = 0,
+    val dataChecksum: String? = null
 )
 
 data class BackupData(
     val metadata: BackupMetadata,
-    val trips: List<TripEntity>,
-    val members: List<TripMemberEntity>,
-    val expenses: List<ExpenseEntity>,
-    val splits: List<ExpenseSplitEntity>,
-    val fundContributions: List<FundContributionEntity>,
-    val exchangeRates: List<ExchangeRateEntity>,
-    val settlementSnapshots: List<SettlementSnapshotEntity>,
-    val auditLogs: List<AuditLogEntity>
+    val trips: List<TripEntity> = emptyList(),
+    val members: List<TripMemberEntity> = emptyList(),
+    val expenses: List<ExpenseEntity> = emptyList(),
+    val splits: List<ExpenseSplitEntity> = emptyList(),
+    val fundContributions: List<FundContributionEntity> = emptyList(),
+    val exchangeRates: List<ExchangeRateEntity> = emptyList(),
+    val settlementSnapshots: List<SettlementSnapshotEntity> = emptyList(),
+    val auditLogs: List<AuditLogEntity> = emptyList()
 )
 
 data class RestoreResult(
@@ -63,8 +64,45 @@ object BackupRestoreManager {
 
     private val dateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
     private val fileDateFormat = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault())
+    const val MAX_BACKUP_FILE_SIZE = 50 * 1024 * 1024L // 50MB giới hạn an toàn chống tràn bộ nhớ (OOM)
 
-    suspend fun exportBackupToJson(db: AppDatabase): String {
+    /**
+     * Ẩn số tài khoản ngân hàng để bảo vệ dữ liệu nhạy cảm khi tệp sao lưu ở dạng rõ (không mã hóa mật khẩu)
+     */
+    fun maskBankAccount(account: String?): String? {
+        if (account.isNullOrBlank()) return null
+        val trimmed = account.trim()
+        val digits = trimmed.filter { it.isLetterOrDigit() }
+        return if (digits.length > 4) {
+            "******" + digits.takeLast(4)
+        } else {
+            "******"
+        }
+    }
+
+    /**
+     * Tính toán mã băm toàn vẹn SHA-256 cho toàn bộ payload dữ liệu
+     */
+    fun computeChecksum(
+        trips: JSONArray,
+        members: JSONArray,
+        expenses: JSONArray,
+        splits: JSONArray,
+        funds: JSONArray
+    ): String {
+        val md = java.security.MessageDigest.getInstance("SHA-256")
+        val data = StringBuilder()
+            .append(trips.toString())
+            .append(members.toString())
+            .append(expenses.toString())
+            .append(splits.toString())
+            .append(funds.toString())
+            .toString()
+        val hash = md.digest(data.toByteArray(Charsets.UTF_8))
+        return hash.joinToString("") { "%02x".format(it) }
+    }
+
+    suspend fun exportBackupToJson(db: AppDatabase, maskSensitiveData: Boolean = false): String {
         val trips = db.tripDao().getAllTripsOnce()
         val members = db.tripMemberDao().getAllMembersOnce()
         val expenses = db.expenseDao().getAllExpensesOnce()
@@ -78,7 +116,7 @@ object BackupRestoreManager {
         val metaJson = JSONObject().apply {
             put("appName", "TripFinance")
             put("backupVersion", 1)
-            put("schemaVersion", 3)
+            put("schemaVersion", 4)
             put("createdAt", now)
             put("createdAtFormatted", dateFormat.format(Date(now)))
             put("totalTrips", trips.size)
@@ -104,6 +142,7 @@ object BackupRestoreManager {
                 put("isSettled", t.isSettled)
                 put("settledAt", t.settledAt ?: JSONObject.NULL)
                 put("createdAt", t.createdAt)
+                put("version", t.version)
             })
         }
 
@@ -116,7 +155,12 @@ object BackupRestoreManager {
                 put("name", m.name)
                 put("role", m.role)
                 put("bankName", m.bankName ?: JSONObject.NULL)
-                put("bankAccount", m.bankAccount ?: JSONObject.NULL)
+                val bankAcc = if (maskSensitiveData && !m.bankAccount.isNullOrBlank()) {
+                    maskBankAccount(m.bankAccount)
+                } else {
+                    m.bankAccount
+                }
+                put("bankAccount", bankAcc ?: JSONObject.NULL)
                 put("bankAccountHolder", m.bankAccountHolder ?: JSONObject.NULL)
                 put("isActive", m.isActive)
                 put("joinedAt", m.joinedAt)
@@ -137,9 +181,11 @@ object BackupRestoreManager {
                 put("exchangeRate", e.exchangeRate)
                 put("convertedTotalAmount", e.convertedTotalAmount)
                 put("splitType", e.splitType)
+                put("receiptImageUri", e.receiptImageUri ?: JSONObject.NULL)
                 put("note", e.note)
                 put("timestamp", e.timestamp)
                 put("createdMemberId", e.createdMemberId)
+                put("updatedAt", e.updatedAt)
                 put("isSynced", e.isSynced)
             })
         }
@@ -152,6 +198,7 @@ object BackupRestoreManager {
                 put("tripId", s.tripId)
                 put("memberId", s.memberId)
                 put("amount", s.amount)
+                put("percentage", s.percentage ?: JSONObject.NULL)
             })
         }
 
@@ -212,6 +259,10 @@ object BackupRestoreManager {
             })
         }
 
+        // Bổ sung mã kiểm tra toàn vẹn
+        val checksum = computeChecksum(tripsArray, membersArray, expensesArray, splitsArray, fundsArray)
+        metaJson.put("dataChecksum", checksum)
+
         val root = JSONObject().apply {
             put("metadata", metaJson)
             put("trips", tripsArray)
@@ -228,9 +279,11 @@ object BackupRestoreManager {
     }
 
     suspend fun createLocalBackupFile(context: Context, db: AppDatabase, password: String? = null): File {
-        val rawJson = exportBackupToJson(db)
-        val finalContent = if (!password.isNullOrBlank()) {
-            BackupCryptoUtils.encryptBackup(rawJson, password)
+        val isEncrypted = !password.isNullOrBlank()
+        // Nếu không mã hóa mật khẩu, tự động che mờ số tài khoản ngân hàng để bảo vệ dữ liệu nhạy cảm
+        val rawJson = exportBackupToJson(db, maskSensitiveData = !isEncrypted)
+        val finalContent = if (isEncrypted) {
+            BackupCryptoUtils.encryptBackup(rawJson, password!!)
         } else rawJson
 
         val backupDir = File(context.filesDir, "backups").apply { if (!exists()) mkdirs() }
@@ -249,9 +302,11 @@ object BackupRestoreManager {
 
     suspend fun writeBackupToUri(context: Context, uri: Uri, db: AppDatabase, password: String? = null): Result<Unit> {
         return try {
-            val rawJson = exportBackupToJson(db)
-            val finalContent = if (!password.isNullOrBlank()) {
-                BackupCryptoUtils.encryptBackup(rawJson, password)
+            val isEncrypted = !password.isNullOrBlank()
+            // Nếu không mã hóa mật khẩu, tự động che mờ số tài khoản ngân hàng khi xuất tệp ra ngoài
+            val rawJson = exportBackupToJson(db, maskSensitiveData = !isEncrypted)
+            val finalContent = if (isEncrypted) {
+                BackupCryptoUtils.encryptBackup(rawJson, password!!)
             } else rawJson
 
             context.contentResolver.openOutputStream(uri)?.use { os ->
@@ -266,9 +321,28 @@ object BackupRestoreManager {
 
     fun readBackupFromUri(context: Context, uri: Uri): Result<String> {
         return try {
+            val length = try {
+                context.contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize } ?: -1L
+            } catch (_: Exception) {
+                -1L
+            }
+            if (length > MAX_BACKUP_FILE_SIZE) {
+                return Result.failure(IllegalArgumentException("Kích thước tệp sao lưu vượt quá giới hạn an toàn (${MAX_BACKUP_FILE_SIZE / (1024 * 1024)}MB)"))
+            }
             context.contentResolver.openInputStream(uri)?.use { inputStream ->
-                val content = inputStream.bufferedReader(Charsets.UTF_8).readText()
-                Result.success(content)
+                val reader = inputStream.bufferedReader(Charsets.UTF_8)
+                val sb = StringBuilder()
+                val buf = CharArray(8192)
+                var read: Int
+                var totalChars = 0L
+                while (reader.read(buf).also { read = it } != -1) {
+                    totalChars += read
+                    if (totalChars > MAX_BACKUP_FILE_SIZE) {
+                        return Result.failure(IllegalArgumentException("Kích thước tệp sao lưu vượt quá giới hạn an toàn (${MAX_BACKUP_FILE_SIZE / (1024 * 1024)}MB)"))
+                    }
+                    sb.append(buf, 0, read)
+                }
+                Result.success(sb.toString())
             } ?: Result.failure(Exception("Không thể mở tệp đã chọn"))
         } catch (e: Exception) {
             Result.failure(e)
@@ -324,6 +398,10 @@ object BackupRestoreManager {
         password: String? = null
     ): Result<RestoreResult> {
         return try {
+            if (file.length() > MAX_BACKUP_FILE_SIZE) {
+                return Result.failure(IllegalArgumentException("Kích thước tệp sao lưu (${file.length() / (1024 * 1024)}MB) vượt quá giới hạn an toàn (${MAX_BACKUP_FILE_SIZE / (1024 * 1024)}MB) để chống tràn bộ nhớ."))
+            }
+
             val isEncrypted = isEncryptedBackupFile(file)
             val parseResult: Result<BackupData> = if (isEncrypted) {
                 if (password.isNullOrBlank()) {
@@ -368,7 +446,19 @@ object BackupRestoreManager {
                     return Result.failure(IllegalArgumentException("ENCRYPTED_BACKUP_PASSWORD_REQUIRED"))
                 }
                 val encryptedJson = context.contentResolver.openInputStream(uri)?.use { stream ->
-                    stream.bufferedReader(Charsets.UTF_8).readText()
+                    val reader = stream.bufferedReader(Charsets.UTF_8)
+                    val sb = StringBuilder()
+                    val buf = CharArray(8192)
+                    var read: Int
+                    var totalChars = 0L
+                    while (reader.read(buf).also { read = it } != -1) {
+                        totalChars += read
+                        if (totalChars > MAX_BACKUP_FILE_SIZE) {
+                            throw IllegalArgumentException("Tệp sao lưu vượt quá giới hạn an toàn (${MAX_BACKUP_FILE_SIZE / (1024 * 1024)}MB)")
+                        }
+                        sb.append(buf, 0, read)
+                    }
+                    sb.toString()
                 } ?: return Result.failure(IllegalArgumentException("Không thể mở tệp từ hệ thống"))
 
                 val decryptResult = BackupCryptoUtils.decryptBackup(encryptedJson, password)
@@ -455,19 +545,25 @@ object BackupRestoreManager {
                 return Result.failure(IllegalArgumentException("Tệp sao lưu không đúng định dạng của TripFinance!"))
             }
 
-            Result.success(
-                BackupData(
-                    metadata = metadata ?: BackupMetadata(),
-                    trips = tripsList,
-                    members = membersList,
-                    expenses = expensesList,
-                    splits = splitsList,
-                    fundContributions = fundsList,
-                    exchangeRates = ratesList,
-                    settlementSnapshots = snapshotsList,
-                    auditLogs = logsList
-                )
+            val data = BackupData(
+                metadata = metadata ?: BackupMetadata(),
+                trips = tripsList,
+                members = membersList,
+                expenses = expensesList,
+                splits = splitsList,
+                fundContributions = fundsList,
+                exchangeRates = ratesList,
+                settlementSnapshots = snapshotsList,
+                auditLogs = logsList
             )
+
+            // Kiểm tra toàn vẹn ngữ nghĩa và các ràng buộc dữ liệu tài chính
+            val validation = validateBackupData(data)
+            if (validation.isFailure) {
+                return Result.failure(validation.exceptionOrNull() ?: IllegalArgumentException("Dữ liệu sao lưu không hợp lệ"))
+            }
+
+            Result.success(data)
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -477,7 +573,7 @@ object BackupRestoreManager {
         reader.beginObject()
         var appName = "TripFinance"
         var backupVersion = 1
-        var schemaVersion = 3
+        var schemaVersion = 4
         var createdAt = 0L
         var createdAtFormatted = ""
         var totalTrips = 0
@@ -488,12 +584,13 @@ object BackupRestoreManager {
         var totalRates = 0
         var totalSnapshots = 0
         var totalLogs = 0
+        var dataChecksum: String? = null
 
         while (reader.hasNext()) {
             when (reader.nextName()) {
                 "appName" -> appName = reader.nextStringOrDefault("TripFinance")
                 "backupVersion" -> backupVersion = reader.nextIntOrDefault(1)
-                "schemaVersion" -> schemaVersion = reader.nextIntOrDefault(3)
+                "schemaVersion" -> schemaVersion = reader.nextIntOrDefault(4)
                 "createdAt" -> createdAt = reader.nextLongOrDefault(0L)
                 "createdAtFormatted" -> createdAtFormatted = reader.nextStringOrDefault("")
                 "totalTrips" -> totalTrips = reader.nextIntOrDefault(0)
@@ -504,6 +601,7 @@ object BackupRestoreManager {
                 "totalRates" -> totalRates = reader.nextIntOrDefault(0)
                 "totalSnapshots" -> totalSnapshots = reader.nextIntOrDefault(0)
                 "totalLogs" -> totalLogs = reader.nextIntOrDefault(0)
+                "dataChecksum" -> dataChecksum = reader.nextStringOrNull()
                 else -> reader.skipValue()
             }
         }
@@ -521,7 +619,8 @@ object BackupRestoreManager {
             totalFunds = totalFunds,
             totalRates = totalRates,
             totalSnapshots = totalSnapshots,
-            totalLogs = totalLogs
+            totalLogs = totalLogs,
+            dataChecksum = dataChecksum
         )
     }
 
@@ -543,6 +642,7 @@ object BackupRestoreManager {
             var isSettled = false
             var settledAt: Long? = null
             var createdAt = System.currentTimeMillis()
+            var version = 1L
 
             while (reader.hasNext()) {
                 when (reader.nextName()) {
@@ -556,6 +656,7 @@ object BackupRestoreManager {
                     "isSettled" -> isSettled = reader.nextBooleanOrDefault()
                     "settledAt" -> settledAt = reader.nextLongOrNull()
                     "createdAt" -> createdAt = reader.nextLongOrDefault(System.currentTimeMillis())
+                    "version" -> version = reader.nextLongOrDefault(1L)
                     else -> reader.skipValue()
                 }
             }
@@ -571,7 +672,8 @@ object BackupRestoreManager {
                     baseCurrency = baseCurrency,
                     isSettled = isSettled,
                     settledAt = settledAt,
-                    createdAt = createdAt
+                    createdAt = createdAt,
+                    version = version
                 )
             )
         }
@@ -650,9 +752,11 @@ object BackupRestoreManager {
             var exchangeRate = 1.0
             var convertedTotalAmount = 0L
             var splitType = "EQUAL"
+            var receiptImageUri: String? = null
             var note = ""
             var timestamp = 0L
             var createdMemberId = ""
+            var updatedAt = System.currentTimeMillis()
             var isSynced = true
 
             while (reader.hasNext()) {
@@ -668,9 +772,11 @@ object BackupRestoreManager {
                     "exchangeRate" -> exchangeRate = reader.nextDoubleOrDefault(1.0)
                     "convertedTotalAmount" -> convertedTotalAmount = reader.nextLongOrDefault(0L)
                     "splitType" -> splitType = reader.nextStringOrDefault("EQUAL")
+                    "receiptImageUri" -> receiptImageUri = reader.nextStringOrNull()
                     "note" -> note = reader.nextStringOrDefault("")
                     "timestamp" -> timestamp = reader.nextLongOrDefault(0L)
                     "createdMemberId" -> createdMemberId = reader.nextStringOrDefault("")
+                    "updatedAt" -> updatedAt = reader.nextLongOrDefault(timestamp)
                     "isSynced" -> isSynced = reader.nextBooleanOrDefault(true)
                     else -> reader.skipValue()
                 }
@@ -689,9 +795,11 @@ object BackupRestoreManager {
                     exchangeRate = exchangeRate,
                     convertedTotalAmount = convertedTotalAmount,
                     splitType = splitType,
+                    receiptImageUri = receiptImageUri,
                     note = note,
                     timestamp = timestamp,
                     createdMemberId = createdMemberId,
+                    updatedAt = updatedAt,
                     isSynced = isSynced
                 )
             )
@@ -712,6 +820,7 @@ object BackupRestoreManager {
             var tripId = ""
             var memberId = ""
             var amount = 0L
+            var percentage: Double? = null
 
             while (reader.hasNext()) {
                 when (reader.nextName()) {
@@ -720,6 +829,7 @@ object BackupRestoreManager {
                     "tripId" -> tripId = reader.nextStringOrDefault()
                     "memberId" -> memberId = reader.nextStringOrDefault()
                     "amount" -> amount = reader.nextLongOrDefault(0L)
+                    "percentage" -> percentage = reader.nextDoubleOrNull()
                     else -> reader.skipValue()
                 }
             }
@@ -730,7 +840,8 @@ object BackupRestoreManager {
                     expenseId = expenseId,
                     tripId = tripId,
                     memberId = memberId,
-                    amount = amount
+                    amount = amount,
+                    percentage = percentage
                 )
             )
         }
@@ -986,6 +1097,15 @@ object BackupRestoreManager {
         }
     }
 
+    private fun JsonReader.nextDoubleOrNull(): Double? {
+        return if (peek() == JsonToken.NULL) {
+            nextNull()
+            null
+        } else {
+            nextDouble()
+        }
+    }
+
     private fun JsonReader.nextBooleanOrDefault(default: Boolean = false): Boolean {
         return if (peek() == JsonToken.NULL) {
             nextNull()
@@ -993,6 +1113,133 @@ object BackupRestoreManager {
         } else {
             nextBoolean()
         }
+    }
+
+    /**
+     * Thẩm định tính toàn vẹn ngữ nghĩa và các ràng buộc dữ liệu tài chính của bản sao lưu:
+     * - Kiểm tra các giá trị enum hợp lệ (Role, Category, PayerType, SplitType)
+     * - Kiểm tra tính nhất quán tripId trên toàn bộ các bảng quan hệ
+     * - Kiểm tra tính toàn vẹn của người nộp, người chi, người tạo khoản chi
+     * - Thẩm tra tổng số tiền chia (Expense Splits sum check) phải khớp chính xác với số tiền quy đổi của khoản chi
+     * - Chặn đứng các hành vi can thiệp sửa tay làm sai lệch vai trò, thêm nhật ký kiểm toán giả hoặc chỉnh sửa số tiền
+     */
+    fun validateBackupData(data: BackupData): Result<Unit> {
+        val validRoles = setOf("ADMIN", "TREASURER", "MEMBER", "VIEWER")
+        val validCategories = setOf("FOOD", "TRANSPORT", "HOTEL", "SIGHTSEEING", "ENTERTAINMENT", "SHOPPING", "OTHER")
+        val validPayerTypes = setOf("MEMBER", "FUND")
+        val validSplitTypes = setOf("EQUAL", "RATIO", "CUSTOM_AMOUNT", "CUSTOM_PARTICIPANT")
+        val tripIds = data.trips.map { it.id }.toSet()
+
+        // 1. Kiểm tra chuyến đi
+        for (trip in data.trips) {
+            if (trip.id.isBlank()) return Result.failure(IllegalArgumentException("Mã chuyến đi (tripId) không được để trống"))
+            if (trip.title.isBlank()) return Result.failure(IllegalArgumentException("Tên chuyến đi không được để trống"))
+            if (trip.joinCode.isBlank()) return Result.failure(IllegalArgumentException("Mã tham gia đoàn (joinCode) không được để trống"))
+        }
+
+        // 2. Kiểm tra thành viên và vai trò
+        val memberIdsByTrip = mutableMapOf<String, MutableSet<String>>()
+        for (member in data.members) {
+            if (!tripIds.contains(member.tripId)) {
+                return Result.failure(IllegalArgumentException("Thành viên '${member.name}' tham chiếu chuyến đi không tồn tại (${member.tripId})"))
+            }
+            if (!validRoles.contains(member.role)) {
+                return Result.failure(IllegalArgumentException("Vai trò '${member.role}' của thành viên '${member.name}' không hợp lệ (hợp lệ: ADMIN, TREASURER, MEMBER, VIEWER)"))
+            }
+            memberIdsByTrip.getOrPut(member.tripId) { mutableSetOf() }.add(member.id)
+        }
+
+        // 3. Kiểm tra các khoản chi và chia tiền
+        val splitsByExpense = data.splits.groupBy { it.expenseId }
+        for (expense in data.expenses) {
+            if (!tripIds.contains(expense.tripId)) {
+                return Result.failure(IllegalArgumentException("Khoản chi '${expense.title}' tham chiếu chuyến đi không tồn tại (${expense.tripId})"))
+            }
+            if (!validCategories.contains(expense.category)) {
+                return Result.failure(IllegalArgumentException("Danh mục '${expense.category}' của khoản chi '${expense.title}' không hợp lệ"))
+            }
+            if (!validPayerTypes.contains(expense.payerType)) {
+                return Result.failure(IllegalArgumentException("Loại người chi '${expense.payerType}' không hợp lệ"))
+            }
+            if (!validSplitTypes.contains(expense.splitType)) {
+                return Result.failure(IllegalArgumentException("Cách thức chia tiền '${expense.splitType}' không hợp lệ"))
+            }
+
+            val tripMembers = memberIdsByTrip[expense.tripId] ?: emptySet()
+            if (expense.payerType == "MEMBER") {
+                if (expense.payerMemberId == null || !tripMembers.contains(expense.payerMemberId)) {
+                    return Result.failure(IllegalArgumentException("Người chi tiền '${expense.payerMemberId}' của khoản '${expense.title}' không tồn tại trong đoàn"))
+                }
+            }
+            if (expense.createdMemberId.isNotBlank() && !tripMembers.contains(expense.createdMemberId)) {
+                return Result.failure(IllegalArgumentException("Người tạo khoản chi '${expense.createdMemberId}' không tồn tại trong đoàn"))
+            }
+
+            if (expense.totalAmount < 0.0 || expense.totalAmount > com.example.domain.model.FinancialLimits.MAX_TRANSACTION_AMOUNT) {
+                return Result.failure(IllegalArgumentException("Số tiền chi '${expense.totalAmount}' của '${expense.title}' không hợp lệ hoặc vượt hạn mức"))
+            }
+            if (expense.convertedTotalAmount < 0L || expense.convertedTotalAmount > com.example.domain.model.FinancialLimits.MAX_TRANSACTION_AMOUNT) {
+                return Result.failure(IllegalArgumentException("Số tiền quy đổi '${expense.convertedTotalAmount}' không hợp lệ"))
+            }
+
+            // KIỂM TRA TỔNG CHIA TIỀN (Split sum check): Tổng chia phải khớp với số tiền quy đổi
+            val splits = splitsByExpense[expense.id] ?: emptyList()
+            if (splits.isNotEmpty()) {
+                val totalSplitSum = splits.sumOf { it.amount }
+                val diff = kotlin.math.abs(totalSplitSum - expense.convertedTotalAmount)
+                // Dung sai làm tròn tối đa số thành viên chia đối với chia đều
+                val allowedTolerance = if (expense.splitType == "EQUAL") splits.size.toLong() else 0L
+                if (diff > allowedTolerance) {
+                    return Result.failure(
+                        IllegalArgumentException("Kiểm tra toàn vẹn thất bại: Khoản chi '${expense.title}' có tổng tiền chia ($totalSplitSum) không khớp với số tiền quy đổi (${expense.convertedTotalAmount}). Dữ liệu đã bị sửa đổi trái phép!")
+                    )
+                }
+            }
+        }
+
+        // 4. Kiểm tra từng bản ghi ExpenseSplit
+        val expenseMap = data.expenses.associateBy { it.id }
+        for (split in data.splits) {
+            val parentExpense = expenseMap[split.expenseId]
+                ?: return Result.failure(IllegalArgumentException("Phần chia tiền '${split.id}' tham chiếu khoản chi không tồn tại (${split.expenseId})"))
+            if (split.tripId != parentExpense.tripId) {
+                return Result.failure(IllegalArgumentException("Phần chia tiền '${split.id}' có tripId không khớp với khoản chi cha"))
+            }
+            val tripMembers = memberIdsByTrip[split.tripId] ?: emptySet()
+            if (!tripMembers.contains(split.memberId)) {
+                return Result.failure(IllegalArgumentException("Thành viên '${split.memberId}' trong phần chia tiền không thuộc đoàn"))
+            }
+            if (split.amount < 0L || split.amount > com.example.domain.model.FinancialLimits.MAX_TRANSACTION_AMOUNT) {
+                return Result.failure(IllegalArgumentException("Số tiền chia '${split.amount}' không hợp lệ"))
+            }
+        }
+
+        // 5. Kiểm tra quỹ chung
+        for (fund in data.fundContributions) {
+            if (!tripIds.contains(fund.tripId)) {
+                return Result.failure(IllegalArgumentException("Khoản nộp quỹ tham chiếu chuyến đi không tồn tại (${fund.tripId})"))
+            }
+            val tripMembers = memberIdsByTrip[fund.tripId] ?: emptySet()
+            if (!tripMembers.contains(fund.memberId)) {
+                return Result.failure(IllegalArgumentException("Người nộp quỹ '${fund.memberId}' không thuộc chuyến đi"))
+            }
+            if (fund.amount < 0L || fund.convertedAmount < 0L) {
+                return Result.failure(IllegalArgumentException("Số tiền nộp quỹ không được âm"))
+            }
+        }
+
+        // 6. Kiểm tra nhật ký kiểm toán (Chống thêm nhật ký giả)
+        for (log in data.auditLogs) {
+            if (!tripIds.contains(log.tripId)) {
+                return Result.failure(IllegalArgumentException("Nhật ký kiểm toán tham chiếu chuyến đi không tồn tại (${log.tripId})"))
+            }
+            val tripMembers = memberIdsByTrip[log.tripId] ?: emptySet()
+            if (log.actorMemberId != "SYSTEM" && !tripMembers.contains(log.actorMemberId)) {
+                return Result.failure(IllegalArgumentException("Người thực hiện nhật ký '${log.actorMemberId}' không tồn tại trong đoàn (nghi vấn nhật ký giả)"))
+            }
+        }
+
+        return Result.success(Unit)
     }
 
     suspend fun restoreFromBackupData(
@@ -1005,34 +1252,82 @@ object BackupRestoreManager {
                 if (clearExisting) {
                     val existingTrips = db.tripDao().getAllTripsOnce()
                     existingTrips.forEach { t ->
+                        // Xóa sạch dữ liệu con trước theo đúng trật tự ràng buộc khóa ngoại để tránh trigger chặn
+                        db.expenseDao().deleteSplitsByTrip(t.id)
+                        db.expenseDao().deleteExpensesByTrip(t.id)
+                        db.fundDao().deleteFundsByTrip(t.id)
+                        db.exchangeRateDao().deleteExchangeRatesByTrip(t.id)
+                        db.settlementDao().deleteSnapshotsByTrip(t.id)
+                        db.auditLogDao().deleteAuditLogsByTrip(t.id)
+                        db.tripMemberDao().deleteMembersByTrip(t.id)
                         db.tripDao().deleteTripById(t.id)
                     }
                 }
 
-                // Chèn theo thứ tự toàn vẹn dữ liệu khóa ngoại (Trips -> Members -> Rates -> Expenses -> Splits -> Funds -> Snapshots -> Logs)
-                if (backupData.trips.isNotEmpty()) {
-                    db.tripDao().insertTrips(backupData.trips)
+                // Chèn / Hợp nhất dữ liệu an toàn
+                for (backupTrip in backupData.trips) {
+                    val existingTrip = db.tripDao().getTripByIdOnce(backupTrip.id)
+                    if (existingTrip != null) {
+                        // Đoàn đã tồn tại trên thiết bị:
+                        // 1. Bảo vệ niêm phong: Nếu đoàn trên máy đã khóa sổ (isSettled = true),
+                        // TUYỆT ĐỐI KHÔNG cho phép bản backup cũ chưa quyết toán mở niêm phong!
+                        val safeIsSettled = existingTrip.isSettled || backupTrip.isSettled
+                        val safeSettledAt = existingTrip.settledAt ?: backupTrip.settledAt
+                        val safeTrip = existingTrip.copy(
+                            isSettled = safeIsSettled,
+                            settledAt = safeSettledAt,
+                            version = maxOf(existingTrip.version, backupTrip.version)
+                        )
+                        db.tripDao().updateTrip(safeTrip)
+                    } else {
+                        // Đoàn mới: Kiểm tra trùng mã joinCode với đoàn khác
+                        var finalJoinCode = backupTrip.joinCode
+                        val codeConflict = db.tripDao().getTripByJoinCode(finalJoinCode)
+                        if (codeConflict != null) {
+                            // Trùng mã với một đoàn khác -> Sinh mã mới ngẫu nhiên để tránh xung đột UNIQUE
+                            var freshCode = com.example.domain.model.TripCodeGenerator.generateCode("TRIP-")
+                            while (db.tripDao().getTripByJoinCode(freshCode) != null) {
+                                freshCode = com.example.domain.model.TripCodeGenerator.generateCode("TRIP-")
+                            }
+                            finalJoinCode = freshCode
+                        }
+                        db.tripDao().insertTrip(backupTrip.copy(joinCode = finalJoinCode))
+                    }
                 }
-                if (backupData.members.isNotEmpty()) {
-                    db.tripMemberDao().insertMembers(backupData.members)
+
+                // Nạp các thực thể con chỉ khi chưa tồn tại trên máy (tránh đè xóa dữ liệu mới phát sinh sau backup)
+                for (member in backupData.members) {
+                    if (db.tripMemberDao().getMemberById(member.id) == null) {
+                        db.tripMemberDao().insertMember(member)
+                    }
                 }
-                if (backupData.exchangeRates.isNotEmpty()) {
-                    db.exchangeRateDao().insertExchangeRates(backupData.exchangeRates)
+                for (rate in backupData.exchangeRates) {
+                    db.exchangeRateDao().insertExchangeRate(rate)
                 }
-                if (backupData.expenses.isNotEmpty()) {
-                    db.expenseDao().insertExpenses(backupData.expenses)
+                for (expense in backupData.expenses) {
+                    if (db.expenseDao().getExpenseById(expense.id) == null) {
+                        db.expenseDao().insertExpense(expense)
+                    }
                 }
-                if (backupData.splits.isNotEmpty()) {
-                    db.expenseDao().insertSplits(backupData.splits)
+                for (split in backupData.splits) {
+                    if (db.expenseDao().getSplitById(split.id) == null) {
+                        db.expenseDao().insertSplits(listOf(split))
+                    }
                 }
-                if (backupData.fundContributions.isNotEmpty()) {
-                    db.fundDao().insertFundContributions(backupData.fundContributions)
+                for (fund in backupData.fundContributions) {
+                    if (db.fundDao().getFundById(fund.id) == null) {
+                        db.fundDao().insertFundContribution(fund)
+                    }
                 }
-                if (backupData.settlementSnapshots.isNotEmpty()) {
-                    db.settlementDao().insertSnapshots(backupData.settlementSnapshots)
+                for (snapshot in backupData.settlementSnapshots) {
+                    if (db.settlementDao().getSnapshotById(snapshot.id) == null) {
+                        db.settlementDao().insertSnapshot(snapshot)
+                    }
                 }
-                if (backupData.auditLogs.isNotEmpty()) {
-                    db.auditLogDao().insertLogs(backupData.auditLogs)
+                for (log in backupData.auditLogs) {
+                    if (db.auditLogDao().getLogById(log.id) == null) {
+                        db.auditLogDao().insertLog(log)
+                    }
                 }
 
                 // Ghi nhận nhật ký khôi phục
@@ -1044,7 +1339,7 @@ object BackupRestoreManager {
                             actorMemberId = "SYSTEM",
                             actorName = "Hệ thống",
                             action = "RESTORE_BACKUP",
-                            description = "Khôi phục thành công bản sao lưu từ ${backupData.metadata.createdAtFormatted}: ${backupData.trips.size} chuyến đi, ${backupData.expenses.size} khoản chi.",
+                            description = "Khôi phục dữ liệu an toàn từ bản sao lưu ${backupData.metadata.createdAtFormatted}: ${backupData.trips.size} đoàn, ${backupData.expenses.size} khoản chi.",
                             timestamp = System.currentTimeMillis()
                         )
                     )

@@ -40,9 +40,25 @@ data class UiState(
     val language: AppLanguage = AppLanguage.VI
 )
 
+sealed class DatabaseInitState {
+    object Initializing : DatabaseInitState()
+    object Ready : DatabaseInitState()
+    data class Error(
+        val errorType: com.example.data.security.DatabaseSecurityErrorType,
+        val message: String,
+        val details: String? = null
+    ) : DatabaseInitState()
+}
+
 class TripFinanceViewModel(application: Application) : AndroidViewModel(application) {
 
+    private val _databaseInitState = MutableStateFlow<DatabaseInitState>(DatabaseInitState.Initializing)
+    val databaseInitState: StateFlow<DatabaseInitState> = _databaseInitState.asStateFlow()
+
+    private val _repositoryFlow = MutableStateFlow<TripFinanceRepository?>(null)
     private val repository: TripFinanceRepository
+        get() = _repositoryFlow.value ?: error("Cơ sở dữ liệu chưa sẵn sàng")
+
     private val sharedPrefs = application.getSharedPreferences("trip_finance_prefs", Context.MODE_PRIVATE)
 
     private val _currentTripId = MutableStateFlow<String?>(null)
@@ -83,9 +99,6 @@ class TripFinanceViewModel(application: Application) : AndroidViewModel(applicat
     )
 
     init {
-        val db = AppDatabase.getDatabase(application)
-        repository = TripFinanceRepository(db)
-
         val filterFlow = combine(
             _selectedCategoryFilter,
             _searchQuery,
@@ -94,48 +107,58 @@ class TripFinanceViewModel(application: Application) : AndroidViewModel(applicat
             FilterState(cat, q, mId, lang)
         }
 
-        uiState = combine(
-            repository.allTrips,
-            _currentTripId,
-            filterFlow,
-            _errorMessage,
-            _successMessage
-        ) { trips, activeTripId, filters, error, success ->
-            val trip = trips.find { it.id == activeTripId } ?: trips.firstOrNull()
-            Triple(trips, trip, filters) to (error to success)
-        }.flatMapLatest { (triple, messagePair) ->
-            val (trips, currentTrip, filters) = triple
-            val (errorMsg, successMsg) = messagePair
-
-            if (currentTrip == null) {
+        uiState = _repositoryFlow.flatMapLatest { repo ->
+            if (repo == null) {
                 flowOf(
                     UiState(
-                        allTrips = trips,
-                        errorMessage = errorMsg,
-                        successMessage = successMsg,
-                        language = filters.language
+                        errorMessage = _errorMessage.value,
+                        successMessage = _successMessage.value,
+                        language = _language.value
                     )
                 )
             } else {
-                val tripId = currentTrip.id
+                combine(
+                    repo.allTrips,
+                    _currentTripId,
+                    filterFlow,
+                    _errorMessage,
+                    _successMessage
+                ) { trips, activeTripId, filters, error, success ->
+                    val trip = trips.find { it.id == activeTripId } ?: trips.firstOrNull()
+                    Triple(trips, trip, filters) to (error to success)
+                }.flatMapLatest { (triple, messagePair) ->
+                    val (trips, currentTrip, filters) = triple
+                    val (errorMsg, successMsg) = messagePair
 
-                val coreFlow = combine(
-                    repository.getMembers(tripId),
-                    repository.getExpenses(tripId),
-                    repository.getSplitsForTrip(tripId),
-                    repository.getFundContributions(tripId),
-                    repository.getExchangeRates(tripId)
-                ) { members, expenses, splits, funds, rates ->
-                    TripCoreData(members, expenses, splits, funds, rates)
-                }
+                    if (currentTrip == null) {
+                        flowOf(
+                            UiState(
+                                allTrips = trips,
+                                errorMessage = errorMsg,
+                                successMessage = successMsg,
+                                language = filters.language
+                            )
+                        )
+                    } else {
+                        val tripId = currentTrip.id
 
-                val auxFlow = combine(
-                    repository.getAuditLogs(tripId),
-                    repository.getSnapshots(tripId),
-                    repository.observeFinancialStatus(tripId)
-                ) { logs, snapshots, financialPair ->
-                    TripAuxData(logs, snapshots, financialPair)
-                }
+                        val coreFlow = combine(
+                            repo.getMembers(tripId),
+                            repo.getExpenses(tripId),
+                            repo.getSplitsForTrip(tripId),
+                            repo.getFundContributions(tripId),
+                            repo.getExchangeRates(tripId)
+                        ) { members, expenses, splits, funds, rates ->
+                            TripCoreData(members, expenses, splits, funds, rates)
+                        }
+
+                        val auxFlow = combine(
+                            repo.getAuditLogs(tripId),
+                            repo.getSnapshots(tripId),
+                            repo.observeFinancialStatus(tripId)
+                        ) { logs, snapshots, financialPair ->
+                            TripAuxData(logs, snapshots, financialPair)
+                        }
 
                 combine(coreFlow, auxFlow) { core, aux ->
                     val (summary, statuses) = aux.financialPair
@@ -163,7 +186,7 @@ class TripFinanceViewModel(application: Application) : AndroidViewModel(applicat
                     )
 
                     val breakdowns = core.expenses.groupBy { it.category }.map { (cat, list) ->
-                        val amount = list.sumOf { it.convertedTotalAmount }
+                        val amount = list.sumOfSafe { it.convertedTotalAmount }
                         val label = if (filters.language == AppLanguage.VI) {
                             catMapVi[cat] ?: cat
                         } else {
@@ -222,11 +245,93 @@ class TripFinanceViewModel(application: Application) : AndroidViewModel(applicat
                     )
                 }
             }
-        }.stateIn(
-            scope = viewModelScope,
-            started = SharingStarted.WhileSubscribed(5000),
-            initialValue = UiState()
-        )
+        }
+    }
+}.stateIn(
+    scope = viewModelScope,
+    started = SharingStarted.WhileSubscribed(5000),
+    initialValue = UiState()
+)
+
+        initDatabase()
+    }
+
+    fun retryDatabaseInit() {
+        initDatabase()
+    }
+
+    private fun initDatabase() {
+        _databaseInitState.value = DatabaseInitState.Initializing
+        try {
+            val db = AppDatabase.getDatabase(getApplication())
+            val repo = TripFinanceRepository(db)
+            _repositoryFlow.value = repo
+            _databaseInitState.value = DatabaseInitState.Ready
+        } catch (e: com.example.data.security.DatabaseSecurityException) {
+            _repositoryFlow.value = null
+            _databaseInitState.value = DatabaseInitState.Error(
+                errorType = e.errorType,
+                message = e.message ?: "Lỗi bảo mật khi mở cơ sở dữ liệu",
+                details = e.cause?.message
+            )
+        } catch (e: Throwable) {
+            _repositoryFlow.value = null
+            _databaseInitState.value = DatabaseInitState.Error(
+                errorType = com.example.data.security.DatabaseSecurityErrorType.UNKNOWN,
+                message = "Không thể khởi tạo cơ sở dữ liệu: ${e.message}",
+                details = e.message
+            )
+        }
+    }
+
+    fun resetDatabaseFresh() {
+        viewModelScope.launch {
+            try {
+                AppDatabase.resetDatabase(getApplication())
+                initDatabase()
+                showSuccess("Đã xóa và tạo mới cơ sở dữ liệu an toàn.")
+            } catch (e: Throwable) {
+                showError("Lỗi khi tạo mới cơ sở dữ liệu: ${e.message}")
+            }
+        }
+    }
+
+    fun restoreFromEmergencyBackup(jsonContent: String, password: String?) {
+        viewModelScope.launch {
+            try {
+                val parseResult = com.example.data.backup.BackupRestoreManager.parseAndValidateBackup(jsonContent, password)
+                if (parseResult.isFailure) {
+                    val err = parseResult.exceptionOrNull()?.message ?: "Tệp sao lưu không hợp lệ hoặc sai mật khẩu"
+                    showError("Khôi phục thất bại: $err")
+                    return@launch
+                }
+                val backupData = parseResult.getOrThrow()
+
+                // Đặt lại CSDL và KeyStore sạch sẽ
+                AppDatabase.resetDatabase(getApplication())
+
+                // Mở CSDL mới và nạp dữ liệu
+                val newDb = AppDatabase.getDatabase(getApplication())
+                val repo = TripFinanceRepository(newDb)
+                _repositoryFlow.value = repo
+
+                val restoreResult = com.example.data.backup.BackupRestoreManager.restoreFromBackupData(
+                    db = newDb,
+                    backupData = backupData,
+                    clearExisting = false
+                )
+
+                if (restoreResult.isSuccess) {
+                    _databaseInitState.value = DatabaseInitState.Ready
+                    showSuccess("Khôi phục thành công ${backupData.trips.size} đoàn từ bản sao lưu!")
+                } else {
+                    val err = restoreResult.exceptionOrNull()?.message ?: "Lỗi khi nạp dữ liệu"
+                    showError("Lỗi nạp dữ liệu: $err")
+                }
+            } catch (e: Throwable) {
+                showError("Lỗi khôi phục khẩn cấp: ${e.message}")
+            }
+        }
     }
 
     fun setLanguage(lang: AppLanguage) {
@@ -402,8 +507,17 @@ class TripFinanceViewModel(application: Application) : AndroidViewModel(applicat
             return
         }
 
-        val convertedTotal = kotlin.math.round(totalAmount * exchangeRate).toLong()
-        val totalSplitSum = splits.sumOf { it.second }
+        if (!totalAmount.isFinite() || totalAmount.isNaN() || totalAmount <= 0.0 || totalAmount > FinancialLimits.MAX_TRANSACTION_AMOUNT) {
+            showError("Số tiền chi tiêu không hợp lệ hoặc vượt quá hạn mức cho phép.")
+            return
+        }
+        if (!exchangeRate.isFinite() || exchangeRate.isNaN() || exchangeRate <= 0.0 || exchangeRate > FinancialLimits.MAX_EXCHANGE_RATE) {
+            showError("Tỷ giá quy đổi không hợp lệ.")
+            return
+        }
+
+        val convertedTotal = FinancialInputValidator.convertToVnd(totalAmount, exchangeRate)
+        val totalSplitSum = splits.sumOfSafe { it.second }
         if (totalSplitSum != convertedTotal) {
             showError("Tổng tiền phân bổ ($totalSplitSum VND) không bằng tổng khoản chi ($convertedTotal VND). Vui lòng kiểm tra lại!")
             return
@@ -481,8 +595,17 @@ class TripFinanceViewModel(application: Application) : AndroidViewModel(applicat
             return
         }
 
-        val convertedTotal = kotlin.math.round(totalAmount * exchangeRate).toLong()
-        val totalSplitSum = splits.sumOf { it.second }
+        if (!totalAmount.isFinite() || totalAmount.isNaN() || totalAmount <= 0.0 || totalAmount > FinancialLimits.MAX_TRANSACTION_AMOUNT) {
+            showError("Số tiền chi tiêu không hợp lệ hoặc vượt quá hạn mức cho phép.")
+            return
+        }
+        if (!exchangeRate.isFinite() || exchangeRate.isNaN() || exchangeRate <= 0.0 || exchangeRate > FinancialLimits.MAX_EXCHANGE_RATE) {
+            showError("Tỷ giá quy đổi không hợp lệ.")
+            return
+        }
+
+        val convertedTotal = FinancialInputValidator.convertToVnd(totalAmount, exchangeRate)
+        val totalSplitSum = splits.sumOfSafe { it.second }
         if (totalSplitSum != convertedTotal) {
             showError("Tổng tiền phân bổ ($totalSplitSum VND) không bằng tổng khoản chi ($convertedTotal VND). Vui lòng kiểm tra lại!")
             return
@@ -584,7 +707,16 @@ class TripFinanceViewModel(application: Application) : AndroidViewModel(applicat
             return
         }
 
-        val convertedAmount = kotlin.math.round(amount.toDouble() * exchangeRate).toLong()
+        if (amount <= 0L || amount > FinancialLimits.MAX_TRANSACTION_AMOUNT) {
+            showError("Số tiền nộp quỹ không hợp lệ (phải từ 1 đến 100 tỷ).")
+            return
+        }
+        if (!exchangeRate.isFinite() || exchangeRate.isNaN() || exchangeRate <= 0.0 || exchangeRate > FinancialLimits.MAX_EXCHANGE_RATE) {
+            showError("Tỷ giá quy đổi không hợp lệ.")
+            return
+        }
+
+        val convertedAmount = FinancialInputValidator.convertToVnd(amount.toDouble(), exchangeRate)
         val contribution = FundContributionEntity(
             id = UUID.randomUUID().toString(),
             tripId = currentTrip.id,
@@ -807,27 +939,66 @@ class TripFinanceViewModel(application: Application) : AndroidViewModel(applicat
             return
         }
 
-        if (!state.financialSummary.isBalanced && kotlin.math.abs(state.financialSummary.balanceDiscrepancy) > 5) {
-            showError("Hệ thống phát hiện chênh lệch đối soát (${state.financialSummary.balanceDiscrepancy} VND). Không thể khóa sổ!")
+        if (state.members.isEmpty()) {
+            showError("Đoàn không có thành viên nào! Không thể thực hiện quyết toán và khóa sổ.")
             return
         }
 
-        val settlementJson = buildString {
-            append("Chuyến đi: ${currentTrip.title}\n")
-            append("Mã: ${currentTrip.joinCode}\n")
-            append("Tổng chi: ${state.financialSummary.totalExpenses} VND\n")
-            append("Tổng thu quỹ: ${state.financialSummary.totalFundCollected} VND\n")
-            append("Quỹ đã chi: ${state.financialSummary.fundPaidExpenses} VND\n")
-            append("Quỹ còn lại: ${state.financialSummary.remainingFund} VND\n")
-            append("\n--- SỐ DƯ TỪNG THÀNH VIÊN ---\n")
-            state.memberStatuses.forEach {
-                append("- ${it.member.name}: Paid=${it.totalPaid} | Owed=${it.totalOwed} | Balance=${it.balance} (${it.status})\n")
-            }
-            append("\n--- KẾ HOẠCH CHUYỂN KHOẢN QUYẾT TOÁN ---\n")
-            state.settlementTransfers.forEachIndexed { idx, tr ->
-                append("${idx + 1}. ${tr.fromMember.name} -> ${tr.toMember.name}: ${tr.amount} VND (${tr.transferNote})\n")
-            }
+        if (!state.financialSummary.isBalanced || state.financialSummary.balanceDiscrepancy != 0L) {
+            showError("Hệ thống phát hiện chênh lệch đối soát (${state.financialSummary.balanceDiscrepancy} VND). Toàn bộ chi tiêu phải được phân bổ cân bằng tuyệt đối để khóa sổ!")
+            return
         }
+
+        val settlementJsonObj = org.json.JSONObject().apply {
+            put("tripId", currentTrip.id)
+            put("tripTitle", currentTrip.title)
+            put("joinCode", currentTrip.joinCode)
+            put("settledAt", System.currentTimeMillis())
+            put("settledByMemberId", currentMember.id)
+            put("settledByMemberName", currentMember.name)
+            put("summary", org.json.JSONObject().apply {
+                put("totalExpenses", state.financialSummary.totalExpenses)
+                put("personalPaidExpenses", state.financialSummary.personalPaidExpenses)
+                put("fundPaidExpenses", state.financialSummary.fundPaidExpenses)
+                put("totalFundCollected", state.financialSummary.totalFundCollected)
+                put("remainingFund", state.financialSummary.remainingFund)
+                put("balanceDiscrepancy", state.financialSummary.balanceDiscrepancy)
+                put("isBalanced", state.financialSummary.isBalanced)
+            })
+            put("members", org.json.JSONArray().apply {
+                state.memberStatuses.forEach { st ->
+                    put(org.json.JSONObject().apply {
+                        put("memberId", st.member.id)
+                        put("name", st.member.name)
+                        put("role", st.member.role)
+                        put("totalPaid", st.totalPaid)
+                        put("outOfPocketPaid", st.outOfPocketPaid)
+                        put("fundContributed", st.fundContributed)
+                        put("totalOwed", st.totalOwed)
+                        put("balance", st.balance)
+                        put("status", st.status.name)
+                        put("bankAccount", st.member.bankAccount ?: org.json.JSONObject.NULL)
+                        put("bankName", st.member.bankName ?: org.json.JSONObject.NULL)
+                    })
+                }
+            })
+            put("transfers", org.json.JSONArray().apply {
+                state.settlementTransfers.forEach { tr ->
+                    put(org.json.JSONObject().apply {
+                        put("fromMemberId", tr.fromMember.id)
+                        put("fromMemberName", tr.fromMember.name)
+                        put("toMemberId", tr.toMember.id)
+                        put("toMemberName", tr.toMember.name)
+                        put("amount", tr.amount)
+                        put("bankName", tr.toMember.bankName ?: org.json.JSONObject.NULL)
+                        put("bankAccount", tr.toMember.bankAccount ?: org.json.JSONObject.NULL)
+                        put("bankAccountHolder", tr.toMember.bankAccountHolder ?: org.json.JSONObject.NULL)
+                        put("transferNote", tr.transferNote)
+                    })
+                }
+            })
+        }
+        val settlementJson = settlementJsonObj.toString(2)
 
         viewModelScope.launch {
             try {
@@ -962,8 +1133,8 @@ class TripFinanceViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
-    fun isEncryptedBackupFile(file: File): Boolean = repository.isEncryptedBackupFile(file)
-    fun isEncryptedBackupUri(context: Context, uri: Uri): Boolean = repository.isEncryptedBackupUri(context, uri)
+    fun isEncryptedBackupFile(file: File): Boolean = _repositoryFlow.value?.isEncryptedBackupFile(file) ?: com.example.data.backup.BackupRestoreManager.isEncryptedBackupFile(file)
+    fun isEncryptedBackupUri(context: Context, uri: Uri): Boolean = _repositoryFlow.value?.isEncryptedBackupUri(context, uri) ?: com.example.data.backup.BackupRestoreManager.isEncryptedBackupUri(context, uri)
 
     fun shareBackupFile(context: Context, file: File) {
         try {

@@ -4,6 +4,8 @@ import android.content.Context
 import android.net.Uri
 import androidx.room.withTransaction
 import org.json.JSONObject
+import org.json.JSONArray
+import com.example.domain.engine.CashFlowMinimizer
 import com.example.data.backup.BackupData
 import com.example.data.backup.BackupMetadata
 import com.example.data.backup.BackupRestoreManager
@@ -37,11 +39,22 @@ class TripFinanceRepository(private val db: AppDatabase) {
         adminBankHolder: String?
     ): String {
         val tripId = UUID.randomUUID().toString()
+        var finalCode = joinCode.uppercase().trim()
+        if (finalCode.isBlank()) {
+            do {
+                finalCode = com.example.domain.model.TripCodeGenerator.generateCode("TRIP-")
+            } while (db.tripDao().getTripByJoinCode(finalCode) != null)
+        } else {
+            if (db.tripDao().getTripByJoinCode(finalCode) != null) {
+                throw IllegalArgumentException("Mã đoàn '$finalCode' đã được sử dụng. Vui lòng chọn một mã khác.")
+            }
+        }
+
         val trip = TripEntity(
             id = tripId,
             title = title,
             description = description,
-            joinCode = joinCode.uppercase().trim(),
+            joinCode = finalCode,
             startDate = startDate,
             endDate = endDate,
             baseCurrency = "VND",
@@ -112,7 +125,16 @@ class TripFinanceRepository(private val db: AppDatabase) {
         return trip.id
     }
 
-    suspend fun updateTrip(trip: TripEntity) = db.tripDao().updateTrip(trip)
+    suspend fun updateTrip(trip: TripEntity) {
+        db.withTransaction {
+            val existing = db.tripDao().getTripByIdOnce(trip.id)
+                ?: throw IllegalArgumentException("Chuyến đi không tồn tại")
+            if (existing.isSettled) {
+                throw IllegalStateException("Chuyến đi '${existing.title}' đã được khóa sổ quyết toán. Không thể sửa thông tin!")
+            }
+            db.tripDao().updateTrip(trip.copy(version = existing.version + 1))
+        }
+    }
 
     suspend fun updateTripDetails(
         tripId: String,
@@ -122,25 +144,36 @@ class TripFinanceRepository(private val db: AppDatabase) {
         endDate: Long,
         actor: TripMemberEntity
     ) {
-        val existing = db.tripDao().getTripByIdOnce(tripId) ?: return
-        val updated = existing.copy(
-            title = title,
-            description = description,
-            startDate = startDate,
-            endDate = endDate
-        )
-        db.tripDao().updateTrip(updated)
-        logAction(
-            tripId = tripId,
-            actorMemberId = actor.id,
-            actorName = actor.name,
-            action = "UPDATE_TRIP",
-            description = "Cập nhật thông tin đoàn '$title'"
-        )
+        db.withTransaction {
+            val existing = db.tripDao().getTripByIdOnce(tripId)
+                ?: throw IllegalArgumentException("Chuyến đi không tồn tại")
+            if (existing.isSettled) {
+                throw IllegalStateException("Chuyến đi '${existing.title}' đã được khóa sổ quyết toán. Không thể sửa đổi thông tin!")
+            }
+            val updated = existing.copy(
+                title = title,
+                description = description,
+                startDate = startDate,
+                endDate = endDate,
+                version = existing.version + 1
+            )
+            db.tripDao().updateTrip(updated)
+            logAction(
+                tripId = tripId,
+                actorMemberId = actor.id,
+                actorName = actor.name,
+                action = "UPDATE_TRIP",
+                description = "Cập nhật thông tin đoàn '$title' (Phiên bản v${existing.version} -> v${updated.version})"
+            )
+        }
     }
 
     suspend fun deleteTripCascade(tripId: String) {
         db.withTransaction {
+            val existing = db.tripDao().getTripByIdOnce(tripId)
+            if (existing != null && existing.isSettled) {
+                throw IllegalStateException("Chuyến đi '${existing.title}' đã được khóa sổ quyết toán niêm phong. Không thể xóa!")
+            }
             // Cascade delete related records atomically
             db.expenseDao().deleteSplitsByTrip(tripId)
             db.expenseDao().deleteExpensesByTrip(tripId)
@@ -166,86 +199,102 @@ class TripFinanceRepository(private val db: AppDatabase) {
         bankAccountHolder: String?,
         actor: TripMemberEntity
     ): String {
-        val trip = db.tripDao().getTripByIdOnce(tripId)
-        if (trip?.isSettled == true) {
-            throw IllegalStateException("Chuyến đi '${trip.title}' đã được khóa sổ quyết toán. Không thể thêm thành viên mới!")
+        return db.withTransaction {
+            val trip = db.tripDao().getTripByIdOnce(tripId)
+                ?: throw IllegalArgumentException("Chuyến đi không tồn tại")
+            if (trip.isSettled) {
+                throw IllegalStateException("Chuyến đi '${trip.title}' đã được khóa sổ quyết toán. Không thể thêm thành viên mới!")
+            }
+            val memberId = UUID.randomUUID().toString()
+            val member = TripMemberEntity(
+                id = memberId,
+                tripId = tripId,
+                userId = "user_" + UUID.randomUUID().toString().take(6),
+                name = name,
+                role = role,
+                isActive = true,
+                bankName = bankName,
+                bankAccount = bankAccount,
+                bankAccountHolder = bankAccountHolder,
+                joinedAt = System.currentTimeMillis()
+            )
+            db.tripMemberDao().insertMember(member)
+            logAction(
+                tripId = tripId,
+                actorMemberId = actor.id,
+                actorName = actor.name,
+                action = "ADD_MEMBER",
+                description = "Thêm thành viên $name với vai trò $role"
+            )
+            memberId
         }
-        val memberId = UUID.randomUUID().toString()
-        val member = TripMemberEntity(
-            id = memberId,
-            tripId = tripId,
-            userId = "user_" + UUID.randomUUID().toString().take(6),
-            name = name,
-            role = role,
-            isActive = true,
-            bankName = bankName,
-            bankAccount = bankAccount,
-            bankAccountHolder = bankAccountHolder,
-            joinedAt = System.currentTimeMillis()
-        )
-        db.tripMemberDao().insertMember(member)
-        logAction(
-            tripId = tripId,
-            actorMemberId = actor.id,
-            actorName = actor.name,
-            action = "ADD_MEMBER",
-            description = "Thêm thành viên $name với vai trò $role"
-        )
-        return memberId
     }
 
     suspend fun updateMember(member: TripMemberEntity, actor: TripMemberEntity) {
-        val trip = db.tripDao().getTripByIdOnce(member.tripId)
-        if (trip?.isSettled == true && actor.role != "ADMIN") {
-            throw IllegalStateException("Chuyến đi đã khóa sổ. Không thể sửa thông tin thành viên!")
+        db.withTransaction {
+            val trip = db.tripDao().getTripByIdOnce(member.tripId)
+                ?: throw IllegalArgumentException("Chuyến đi không tồn tại")
+            if (trip.isSettled && actor.role != "ADMIN") {
+                throw IllegalStateException("Chuyến đi đã khóa sổ. Không thể sửa thông tin thành viên!")
+            }
+            db.tripMemberDao().updateMember(member)
+            logAction(
+                tripId = member.tripId,
+                actorMemberId = actor.id,
+                actorName = actor.name,
+                action = "UPDATE_MEMBER",
+                description = "Cập nhật thông tin thành viên ${member.name} (${member.role})"
+            )
         }
-        db.tripMemberDao().updateMember(member)
-        logAction(
-            tripId = member.tripId,
-            actorMemberId = actor.id,
-            actorName = actor.name,
-            action = "UPDATE_MEMBER",
-            description = "Cập nhật thông tin thành viên ${member.name} (${member.role})"
-        )
     }
 
     suspend fun removeOrDeactivateMember(member: TripMemberEntity, actor: TripMemberEntity) {
-        val trip = db.tripDao().getTripByIdOnce(member.tripId)
-        if (trip?.isSettled == true) {
-            throw IllegalStateException("Chuyến đi '${trip.title}' đã được khóa sổ quyết toán. Không thể xóa hoặc ngừng hoạt động thành viên!")
-        }
-        val paidExpenseCount = db.expenseDao().countExpensesByPayer(member.id)
-        val createdExpenseCount = db.expenseDao().countExpensesCreatedByMember(member.id)
-        val splitCount = db.expenseDao().countSplitsByMember(member.id)
-        val fundCount = db.fundDao().countFundContributionsByMember(member.id)
-        val hasFinancialRecords = (paidExpenseCount + createdExpenseCount + splitCount + fundCount) > 0
+        db.withTransaction {
+            val trip = db.tripDao().getTripByIdOnce(member.tripId)
+                ?: throw IllegalArgumentException("Chuyến đi không tồn tại")
+            if (trip.isSettled) {
+                throw IllegalStateException("Chuyến đi '${trip.title}' đã được khóa sổ quyết toán. Không thể xóa hoặc ngừng hoạt động thành viên!")
+            }
+            val paidExpenseCount = db.expenseDao().countExpensesByPayer(member.id)
+            val createdExpenseCount = db.expenseDao().countExpensesCreatedByMember(member.id)
+            val splitCount = db.expenseDao().countSplitsByMember(member.id)
+            val fundCount = db.fundDao().countFundContributionsByMember(member.id)
+            val hasFinancialRecords = (paidExpenseCount + createdExpenseCount + splitCount + fundCount) > 0
 
-        if (hasFinancialRecords) {
-            // SRS 3: Thành viên có giao dịch tài chính không được phép "Xóa", chỉ được "Ngừng hoạt động (Deactivate)"
-            db.tripMemberDao().setMemberActiveStatus(member.id, false)
-            logAction(
-                tripId = member.tripId,
-                actorMemberId = actor.id,
-                actorName = actor.name,
-                action = "DEACTIVATE_MEMBER",
-                description = "Ngừng hoạt động thành viên ${member.name} (đã phát sinh: $paidExpenseCount chi trả, $splitCount phân bổ, $fundCount đóng quỹ)"
-            )
-        } else {
-            // CSDL sẽ kiểm tra thêm qua trigger trg_prevent_delete_member_with_financials và ForeignKey RESTRICT
-            db.tripMemberDao().deleteMember(member.id)
-            logAction(
-                tripId = member.tripId,
-                actorMemberId = actor.id,
-                actorName = actor.name,
-                action = "DELETE_MEMBER",
-                description = "Xóa hoàn toàn thành viên ${member.name} khỏi đoàn (chưa có phát sinh chi tiêu)"
-            )
+            if (hasFinancialRecords) {
+                // SRS 3: Thành viên có giao dịch tài chính không được phép "Xóa", chỉ được "Ngừng hoạt động (Deactivate)"
+                db.tripMemberDao().setMemberActiveStatus(member.id, false)
+                logAction(
+                    tripId = member.tripId,
+                    actorMemberId = actor.id,
+                    actorName = actor.name,
+                    action = "DEACTIVATE_MEMBER",
+                    description = "Ngừng hoạt động thành viên ${member.name} (đã phát sinh: $paidExpenseCount chi trả, $splitCount phân bổ, $fundCount đóng quỹ)"
+                )
+            } else {
+                // CSDL sẽ kiểm tra thêm qua trigger trg_prevent_delete_member_with_financials và ForeignKey RESTRICT
+                db.tripMemberDao().deleteMember(member.id)
+                logAction(
+                    tripId = member.tripId,
+                    actorMemberId = actor.id,
+                    actorName = actor.name,
+                    action = "DELETE_MEMBER",
+                    description = "Xóa hoàn toàn thành viên ${member.name} khỏi đoàn (chưa có phát sinh chi tiêu)"
+                )
+            }
         }
     }
 
     suspend fun deleteMemberDirect(memberId: String) {
-        // Gọi xóa trực tiếp - SQLite Trigger & Foreign Key RESTRICT sẽ chặn đứng nếu có phát sinh tài chính
-        db.tripMemberDao().deleteMember(memberId)
+        db.withTransaction {
+            val member = db.tripMemberDao().getMemberById(memberId) ?: return@withTransaction
+            val trip = db.tripDao().getTripByIdOnce(member.tripId)
+            if (trip?.isSettled == true) {
+                throw IllegalStateException("Chuyến đi '${trip.title}' đã khóa sổ quyết toán. Không thể xóa thành viên!")
+            }
+            // Gọi xóa trực tiếp - SQLite Trigger & Foreign Key RESTRICT sẽ chặn đứng nếu có phát sinh tài chính
+            db.tripMemberDao().deleteMember(memberId)
+        }
     }
 
     // Expenses
@@ -263,11 +312,12 @@ class TripFinanceRepository(private val db: AppDatabase) {
         splits: List<ExpenseSplitEntity>,
         actor: TripMemberEntity
     ) {
-        val trip = db.tripDao().getTripByIdOnce(expense.tripId)
-        if (trip?.isSettled == true) {
-            throw IllegalStateException("Chuyến đi '${trip.title}' đã được khóa sổ quyết toán. Không thể thêm khoản chi mới!")
-        }
         db.withTransaction {
+            val trip = db.tripDao().getTripByIdOnce(expense.tripId)
+                ?: throw IllegalArgumentException("Chuyến đi không tồn tại")
+            if (trip.isSettled) {
+                throw IllegalStateException("Chuyến đi '${trip.title}' đã được khóa sổ quyết toán. Không thể thêm khoản chi mới!")
+            }
             db.expenseDao().insertExpenseWithSplits(expense, splits)
             val payerDesc = if (expense.payerType == "FUND") "Quỹ đoàn" else (actor.name)
             val afterJson = JSONObject().apply {
@@ -302,11 +352,12 @@ class TripFinanceRepository(private val db: AppDatabase) {
         splits: List<ExpenseSplitEntity>,
         actor: TripMemberEntity
     ) {
-        val trip = db.tripDao().getTripByIdOnce(expense.tripId)
-        if (trip?.isSettled == true) {
-            throw IllegalStateException("Chuyến đi '${trip.title}' đã được khóa sổ quyết toán. Không thể chỉnh sửa khoản chi!")
-        }
         db.withTransaction {
+            val trip = db.tripDao().getTripByIdOnce(expense.tripId)
+                ?: throw IllegalArgumentException("Chuyến đi không tồn tại")
+            if (trip.isSettled) {
+                throw IllegalStateException("Chuyến đi '${trip.title}' đã được khóa sổ quyết toán. Không thể chỉnh sửa khoản chi!")
+            }
             val existingExpense = db.expenseDao().getExpenseById(expense.id)
             val existingSplits = db.expenseDao().getSplitsByExpenseOnce(expense.id)
 
@@ -361,11 +412,12 @@ class TripFinanceRepository(private val db: AppDatabase) {
     }
 
     suspend fun deleteExpense(expense: ExpenseEntity, actor: TripMemberEntity) {
-        val trip = db.tripDao().getTripByIdOnce(expense.tripId)
-        if (trip?.isSettled == true) {
-            throw IllegalStateException("Chuyến đi '${trip.title}' đã được khóa sổ quyết toán. Không thể xóa khoản chi!")
-        }
         db.withTransaction {
+            val trip = db.tripDao().getTripByIdOnce(expense.tripId)
+                ?: throw IllegalArgumentException("Chuyến đi không tồn tại")
+            if (trip.isSettled) {
+                throw IllegalStateException("Chuyến đi '${trip.title}' đã được khóa sổ quyết toán. Không thể xóa khoản chi!")
+            }
             val beforeJson = JSONObject().apply {
                 put("title", expense.title)
                 put("category", expense.category)
@@ -402,18 +454,21 @@ class TripFinanceRepository(private val db: AppDatabase) {
         contributorName: String,
         actor: TripMemberEntity
     ) {
-        val trip = db.tripDao().getTripByIdOnce(contribution.tripId)
-        if (trip?.isSettled == true) {
-            throw IllegalStateException("Chuyến đi '${trip.title}' đã được khóa sổ quyết toán. Không thể nộp thêm quỹ!")
+        db.withTransaction {
+            val trip = db.tripDao().getTripByIdOnce(contribution.tripId)
+                ?: throw IllegalArgumentException("Chuyến đi không tồn tại")
+            if (trip.isSettled) {
+                throw IllegalStateException("Chuyến đi '${trip.title}' đã được khóa sổ quyết toán. Không thể nộp thêm quỹ!")
+            }
+            db.fundDao().insertFundContribution(contribution)
+            logAction(
+                tripId = contribution.tripId,
+                actorMemberId = actor.id,
+                actorName = actor.name,
+                action = "CONTRIBUTE_FUND",
+                description = "$contributorName nộp quỹ ${contribution.convertedAmount} VND (Ghi nhận bởi ${actor.name})"
+            )
         }
-        db.fundDao().insertFundContribution(contribution)
-        logAction(
-            tripId = contribution.tripId,
-            actorMemberId = actor.id,
-            actorName = actor.name,
-            action = "CONTRIBUTE_FUND",
-            description = "$contributorName nộp quỹ ${contribution.convertedAmount} VND (Ghi nhận bởi ${actor.name})"
-        )
     }
 
     suspend fun deleteFundContribution(
@@ -421,18 +476,21 @@ class TripFinanceRepository(private val db: AppDatabase) {
         contributorName: String,
         actor: TripMemberEntity
     ) {
-        val trip = db.tripDao().getTripByIdOnce(contribution.tripId)
-        if (trip?.isSettled == true) {
-            throw IllegalStateException("Chuyến đi '${trip.title}' đã được khóa sổ quyết toán. Không thể xóa khoản nộp quỹ!")
+        db.withTransaction {
+            val trip = db.tripDao().getTripByIdOnce(contribution.tripId)
+                ?: throw IllegalArgumentException("Chuyến đi không tồn tại")
+            if (trip.isSettled) {
+                throw IllegalStateException("Chuyến đi '${trip.title}' đã được khóa sổ quyết toán. Không thể xóa khoản nộp quỹ!")
+            }
+            db.fundDao().deleteFundContribution(contribution.id)
+            logAction(
+                tripId = contribution.tripId,
+                actorMemberId = actor.id,
+                actorName = actor.name,
+                action = "DELETE_FUND",
+                description = "Xóa khoản nộp quỹ của $contributorName (${contribution.convertedAmount} VND)"
+            )
         }
-        db.fundDao().deleteFundContribution(contribution.id)
-        logAction(
-            tripId = contribution.tripId,
-            actorMemberId = actor.id,
-            actorName = actor.name,
-            action = "DELETE_FUND",
-            description = "Xóa khoản nộp quỹ của $contributorName (${contribution.convertedAmount} VND)"
-        )
     }
 
     // Exchange Rates
@@ -440,18 +498,21 @@ class TripFinanceRepository(private val db: AppDatabase) {
         db.exchangeRateDao().getExchangeRates(tripId)
 
     suspend fun updateExchangeRate(rate: ExchangeRateEntity, actor: TripMemberEntity) {
-        val trip = db.tripDao().getTripByIdOnce(rate.tripId)
-        if (trip?.isSettled == true) {
-            throw IllegalStateException("Chuyến đi '${trip.title}' đã được khóa sổ quyết toán. Không thể thay đổi tỷ giá!")
+        db.withTransaction {
+            val trip = db.tripDao().getTripByIdOnce(rate.tripId)
+                ?: throw IllegalArgumentException("Chuyến đi không tồn tại")
+            if (trip.isSettled) {
+                throw IllegalStateException("Chuyến đi '${trip.title}' đã được khóa sổ quyết toán. Không thể thay đổi tỷ giá!")
+            }
+            db.exchangeRateDao().insertExchangeRate(rate)
+            logAction(
+                tripId = rate.tripId,
+                actorMemberId = actor.id,
+                actorName = actor.name,
+                action = "UPDATE_RATE",
+                description = "Cập nhật tỷ giá 1 ${rate.currencyCode} = ${rate.rateToBase} VND"
+            )
         }
-        db.exchangeRateDao().insertExchangeRate(rate)
-        logAction(
-            tripId = rate.tripId,
-            actorMemberId = actor.id,
-            actorName = actor.name,
-            action = "UPDATE_RATE",
-            description = "Cập nhật tỷ giá 1 ${rate.currencyCode} = ${rate.rateToBase} VND"
-        )
     }
 
     // Settlement & Snapshots
@@ -464,42 +525,186 @@ class TripFinanceRepository(private val db: AppDatabase) {
         summary: FinancialSummary,
         settlementJson: String,
         actor: TripMemberEntity
-    ) {
-        val snapshot = SettlementSnapshotEntity(
-            id = UUID.randomUUID().toString(),
-            tripId = trip.id,
-            snapshotTitle = snapshotTitle,
-            createdAt = System.currentTimeMillis(),
-            totalExpenses = summary.totalExpenses,
-            totalFundCollected = summary.totalFundCollected,
-            totalFundSpent = summary.fundPaidExpenses,
-            remainingFund = summary.remainingFund,
-            settlementJson = settlementJson
-        )
-        db.settlementDao().insertSnapshot(snapshot)
-        db.tripDao().updateTrip(trip.copy(isSettled = true, settledAt = System.currentTimeMillis()))
+    ): SettlementSnapshotEntity {
+        return db.withTransaction {
+            // 1. Kiểm tra quyền Admin
+            if (actor.role != "ADMIN") {
+                throw IllegalStateException("Chỉ Trưởng đoàn (Admin) mới có quyền khóa sổ và quyết toán chuyến đi!")
+            }
 
-        logAction(
-            tripId = trip.id,
-            actorMemberId = actor.id,
-            actorName = actor.name,
-            action = "SETTLE_TRIP",
-            description = "Khóa sổ và quyết toán chuyến đi. Snapshot: $snapshotTitle"
-        )
+            // 2. Lấy dữ liệu mới nhất từ CSDL bên trong transaction để chống triệt để TOCTOU (Time-of-Check to Time-of-Use)
+            val freshTrip = db.tripDao().getTripByIdOnce(trip.id)
+                ?: throw IllegalArgumentException("Chuyến đi không tồn tại trên hệ thống!")
+
+            if (freshTrip.isSettled) {
+                throw IllegalStateException("Chuyến đi '${freshTrip.title}' đã được khóa sổ quyết toán từ trước!")
+            }
+
+            // 3. Khóa lạc quan (Optimistic Locking): Ngăn chặn ghi đè thay đổi đồng thời nếu phiên bản bị lệch
+            if (freshTrip.version != trip.version) {
+                throw java.util.ConcurrentModificationException(
+                    "Dữ liệu chuyến đi '${trip.title}' đã bị thay đổi đồng thời bởi thao tác khác (Phiên bản trên máy: ${trip.version}, phiên bản hệ thống: ${freshTrip.version}). Vui lòng tải lại dữ liệu trước khi khóa sổ!"
+                )
+            }
+
+            // 4. Kiểm tra danh sách thành viên: Đoàn không có thành viên nào TUYỆT ĐỐI không được khóa sổ
+            val members = db.tripMemberDao().getMembersByTripOnce(trip.id)
+            if (members.isEmpty()) {
+                throw IllegalStateException("Đoàn không có thành viên nào! Không thể thực hiện quyết toán và khóa sổ.")
+            }
+
+            // 5. Tính toán đối soát từ CSDL tươi để thẩm định tính toàn vẹn (Zero discrepancy tolerance)
+            val expenses = db.expenseDao().getExpensesByTripOnce(trip.id)
+            val splits = db.expenseDao().getAllSplitsByTripOnce(trip.id)
+            val funds = db.fundDao().getFundContributionsOnce(trip.id)
+
+            val (freshSummary, memberStatuses) = calculateFinancialSummaryAndStatuses(
+                members = members,
+                expenses = expenses,
+                splits = splits,
+                fundContributions = funds
+            )
+
+            // Dung sai chênh lệch đối soát phải bằng 0 tuyệt đối (không cho phép lệch nhỏ tích lũy)
+            if (!freshSummary.isBalanced || freshSummary.balanceDiscrepancy != 0L) {
+                throw IllegalStateException(
+                    "Không thể khóa sổ: Phát hiện chênh lệch đối soát (${freshSummary.balanceDiscrepancy} VND). Toàn bộ chi tiêu phải được phân bổ cân bằng tuyệt đối (chênh lệch = 0 đ)!"
+                )
+            }
+
+            val settledAt = System.currentTimeMillis()
+
+            // 6. Thực thi khóa sổ và tăng version nguyên tử qua SQLite Query
+            val rowsUpdated = db.tripDao().lockSettlementWithOptimisticLock(
+                tripId = trip.id,
+                expectedVersion = trip.version,
+                settledAt = settledAt
+            )
+            if (rowsUpdated == 0) {
+                throw java.util.ConcurrentModificationException(
+                    "Không thể khóa sổ do xung đột đồng thời (Optimistic Lock Failure). Vui lòng thử lại sau khi làm mới trang."
+                )
+            }
+
+            // 7. Tạo chuỗi JSON cấu trúc chuẩn RFC 8259 (JSON thực thụ, không phải văn bản thô)
+            val transfers = com.example.domain.engine.SettlementEngine.computeSimplifiedTransfers(
+                memberStatuses = memberStatuses,
+                tripJoinCode = freshTrip.joinCode,
+                remainingFund = freshSummary.remainingFund
+            )
+            val structuredSettlementJson = JSONObject().apply {
+                put("version", 1)
+                put("tripId", freshTrip.id)
+                put("tripTitle", freshTrip.title)
+                put("joinCode", freshTrip.joinCode)
+                put("settledAt", settledAt)
+                put("settledByMemberId", actor.id)
+                put("settledByMemberName", actor.name)
+                put("summary", JSONObject().apply {
+                    put("totalExpenses", freshSummary.totalExpenses)
+                    put("personalPaidExpenses", freshSummary.personalPaidExpenses)
+                    put("fundPaidExpenses", freshSummary.fundPaidExpenses)
+                    put("totalFundCollected", freshSummary.totalFundCollected)
+                    put("remainingFund", freshSummary.remainingFund)
+                    put("balanceDiscrepancy", freshSummary.balanceDiscrepancy)
+                    put("isBalanced", freshSummary.isBalanced)
+                    put("memberCount", freshSummary.memberCount)
+                    put("expenseCount", freshSummary.expenseCount)
+                })
+                put("members", JSONArray().apply {
+                    memberStatuses.forEach { st ->
+                        put(JSONObject().apply {
+                            put("memberId", st.member.id)
+                            put("name", st.member.name)
+                            put("role", st.member.role)
+                            put("totalPaid", st.totalPaid)
+                            put("outOfPocketPaid", st.outOfPocketPaid)
+                            put("fundContributed", st.fundContributed)
+                            put("totalOwed", st.totalOwed)
+                            put("balance", st.balance)
+                            put("status", st.status.name)
+                            put("bankAccount", st.member.bankAccount ?: JSONObject.NULL)
+                            put("bankName", st.member.bankName ?: JSONObject.NULL)
+                            put("bankAccountHolder", st.member.bankAccountHolder ?: JSONObject.NULL)
+                        })
+                    }
+                })
+                put("transfers", JSONArray().apply {
+                    transfers.forEach { tr ->
+                        put(JSONObject().apply {
+                            put("fromMemberId", tr.fromMember.id)
+                            put("fromMemberName", tr.fromMember.name)
+                            put("toMemberId", tr.toMember.id)
+                            put("toMemberName", tr.toMember.name)
+                            put("amount", tr.amount)
+                            put("bankName", tr.toMember.bankName ?: JSONObject.NULL)
+                            put("bankAccount", tr.toMember.bankAccount ?: JSONObject.NULL)
+                            put("bankAccountHolder", tr.toMember.bankAccountHolder ?: JSONObject.NULL)
+                            put("transferNote", tr.transferNote)
+                        })
+                    }
+                })
+            }.toString(2)
+
+            val snapshot = SettlementSnapshotEntity(
+                id = UUID.randomUUID().toString(),
+                tripId = trip.id,
+                snapshotTitle = snapshotTitle,
+                createdAt = settledAt,
+                totalExpenses = freshSummary.totalExpenses,
+                totalFundCollected = freshSummary.totalFundCollected,
+                totalFundSpent = freshSummary.fundPaidExpenses,
+                remainingFund = freshSummary.remainingFund,
+                settlementJson = structuredSettlementJson
+            )
+            db.settlementDao().insertSnapshot(snapshot)
+
+            logAction(
+                tripId = trip.id,
+                actorMemberId = actor.id,
+                actorName = actor.name,
+                action = "SETTLE_TRIP",
+                description = "Khóa sổ và quyết toán chuyến đi. Snapshot: $snapshotTitle (Phiên bản v${freshTrip.version} -> v${freshTrip.version + 1})"
+            )
+
+            snapshot
+        }
     }
 
     suspend fun reopenSettlement(trip: TripEntity, actor: TripMemberEntity) {
-        if (actor.role != "ADMIN") {
-            throw IllegalStateException("Chỉ Trưởng đoàn (Admin) mới có quyền mở khóa sổ chuyến đi!")
+        db.withTransaction {
+            if (actor.role != "ADMIN") {
+                throw IllegalStateException("Chỉ Trưởng đoàn (Admin) mới có quyền mở khóa sổ chuyến đi!")
+            }
+            val freshTrip = db.tripDao().getTripByIdOnce(trip.id)
+                ?: throw IllegalArgumentException("Chuyến đi không tồn tại!")
+
+            if (!freshTrip.isSettled) {
+                throw IllegalStateException("Chuyến đi '${freshTrip.title}' hiện chưa khóa sổ!")
+            }
+
+            if (freshTrip.version != trip.version) {
+                throw java.util.ConcurrentModificationException(
+                    "Dữ liệu chuyến đi đã bị thay đổi đồng thời (phiên bản trên máy: ${trip.version}, trên hệ thống: ${freshTrip.version}). Vui lòng tải lại trang!"
+                )
+            }
+
+            val rowsUpdated = db.tripDao().reopenSettlementWithOptimisticLock(
+                tripId = trip.id,
+                expectedVersion = trip.version
+            )
+            if (rowsUpdated == 0) {
+                throw java.util.ConcurrentModificationException("Không thể mở khóa sổ do xung đột đồng thời. Vui lòng thử lại sau khi làm mới!")
+            }
+
+            logAction(
+                tripId = trip.id,
+                actorMemberId = actor.id,
+                actorName = actor.name,
+                action = "REOPEN_SETTLEMENT",
+                description = "Trưởng đoàn ${actor.name} đã mở khóa sổ chuyến đi '${trip.title}' để tiếp tục cập nhật dữ liệu (Phiên bản v${freshTrip.version} -> v${freshTrip.version + 1})"
+            )
         }
-        db.tripDao().updateTrip(trip.copy(isSettled = false, settledAt = null))
-        logAction(
-            tripId = trip.id,
-            actorMemberId = actor.id,
-            actorName = actor.name,
-            action = "REOPEN_SETTLEMENT",
-            description = "Trưởng đoàn ${actor.name} đã mở khóa sổ chuyến đi '${trip.title}' để tiếp tục cập nhật dữ liệu"
-        )
     }
 
     // Audit logs
@@ -543,101 +748,110 @@ class TripFinanceRepository(private val db: AppDatabase) {
             getSplitsForTrip(tripId),
             getFundContributions(tripId)
         ) { members, expenses, splits, fundContributions ->
-            val totalExpenseSum = expenses.sumOf { it.convertedTotalAmount }
-            val fundPaidExpensesSum = expenses
-                .filter { it.payerType == "FUND" }
-                .sumOf { it.convertedTotalAmount }
-            val personalPaidExpensesSum = expenses
-                .filter { it.payerType == "MEMBER" }
-                .sumOf { it.convertedTotalAmount }
-            val totalFundCollected = fundContributions.sumOf { it.convertedAmount }
-            val remainingFund = totalFundCollected - fundPaidExpensesSum
-
-            // Tính toán tài chính cho từng thành viên
-            val memberStatuses = members.map { member ->
-                // 1. Chi hộ thực tế từ túi thành viên (expenses where payerMemberId == member.id and payerType == MEMBER)
-                val outOfPocket = expenses
-                    .filter { it.payerType == "MEMBER" && it.payerMemberId == member.id }
-                    .sumOf { it.convertedTotalAmount }
-
-                // 2. Tiền đã đóng góp vào Quỹ chung
-                val fundContributed = fundContributions
-                    .filter { it.memberId == member.id }
-                    .sumOf { it.convertedAmount }
-
-                // Tổng tiền thành viên đã thực tế chi/nộp cho đoàn
-                val totalPaid = outOfPocket + fundContributed
-
-                // 3. Tiền phải chịu chi (Owed) từ các bảng phân bổ
-                val totalOwed = splits
-                    .filter { it.memberId == member.id }
-                    .sumOf { it.amount }
-
-                // 4. Số dư ròng (Balance) = Paid - Owed
-                val balance = totalPaid - totalOwed
-
-                val status = when {
-                    balance > 0 -> BalanceStatus.RECEIVE
-                    balance < 0 -> BalanceStatus.PAY
-                    else -> BalanceStatus.BALANCED
-                }
-
-                MemberFinancialStatus(
-                    member = member,
-                    totalPaid = totalPaid,
-                    outOfPocketPaid = outOfPocket,
-                    fundContributed = fundContributed,
-                    totalOwed = totalOwed,
-                    balance = balance,
-                    status = status
-                )
-            }
-
-            val memberIds = members.map { it.id }.toSet()
-
-            // ĐỐI SOÁT TÀI CHÍNH KẾ TOÁN (Reconciliation):
-            // 1. Phân bổ chi phí: Mỗi khoản chi phải có tổng số tiền phân bổ trong splits đúng bằng số tiền của khoản chi
-            val splitsByExpense = splits.groupBy { it.expenseId }
-            val splitDiscrepancy = expenses.sumOf { exp ->
-                val expSplits = splitsByExpense[exp.id] ?: emptyList()
-                kotlin.math.abs(exp.convertedTotalAmount - expSplits.sumOf { it.amount })
-            }
-
-            // 2. Kiểm tra người chi cá nhân: Khoản chi cá nhân phải có người chi thuộc danh sách thành viên đoàn
-            val unassignedPayerAmount = expenses
-                .filter { it.payerType == "MEMBER" && (it.payerMemberId == null || !memberIds.contains(it.payerMemberId)) }
-                .sumOf { it.convertedTotalAmount }
-
-            // 3. Kiểm tra người nộp quỹ: Khoản nộp quỹ phải có người nộp thuộc danh sách thành viên đoàn
-            val unassignedFundAmount = fundContributions
-                .filter { !memberIds.contains(it.memberId) }
-                .sumOf { it.convertedAmount }
-
-            // 4. Kiểm tra phân bổ mồ côi: Split không được gán cho người không thuộc đoàn
-            val orphanSplitAmount = splits
-                .filter { !memberIds.contains(it.memberId) }
-                .sumOf { it.amount }
-
-            // Tổng chênh lệch đối soát thực tế:
-            // Sổ sách chỉ được coi là cân bằng khi mọi khoản chi được phân bổ chính xác 100%
-            // và mọi dòng tiền thu/chi đều có thành viên hợp lệ chịu trách nhiệm
-            val discrepancy = splitDiscrepancy + unassignedPayerAmount + unassignedFundAmount + orphanSplitAmount
-            val isBalanced = members.isNotEmpty() && discrepancy <= 5L
-
-            val summary = FinancialSummary(
-                totalExpenses = totalExpenseSum,
-                personalPaidExpenses = personalPaidExpensesSum,
-                fundPaidExpenses = fundPaidExpensesSum,
-                totalFundCollected = totalFundCollected,
-                remainingFund = remainingFund,
-                isBalanced = isBalanced,
-                balanceDiscrepancy = discrepancy,
-                memberCount = members.size,
-                expenseCount = expenses.size
-            )
-
-            summary to memberStatuses
+            calculateFinancialSummaryAndStatuses(members, expenses, splits, fundContributions)
         }
+    }
+
+    fun calculateFinancialSummaryAndStatuses(
+        members: List<TripMemberEntity>,
+        expenses: List<ExpenseEntity>,
+        splits: List<ExpenseSplitEntity>,
+        fundContributions: List<FundContributionEntity>
+    ): Pair<FinancialSummary, List<MemberFinancialStatus>> {
+        val totalExpenseSum = expenses.sumOfSafe { it.convertedTotalAmount }
+        val fundPaidExpensesSum = expenses
+            .filter { it.payerType == "FUND" }
+            .sumOfSafe { it.convertedTotalAmount }
+        val personalPaidExpensesSum = expenses
+            .filter { it.payerType == "MEMBER" }
+            .sumOfSafe { it.convertedTotalAmount }
+        val totalFundCollected = fundContributions.sumOfSafe { it.convertedAmount }
+        val remainingFund = totalFundCollected - fundPaidExpensesSum
+
+        // Tính toán tài chính cho từng thành viên
+        val memberStatuses = members.map { member ->
+            // 1. Chi hộ thực tế từ túi thành viên (expenses where payerMemberId == member.id and payerType == MEMBER)
+            val outOfPocket = expenses
+                .filter { it.payerType == "MEMBER" && it.payerMemberId == member.id }
+                .sumOfSafe { it.convertedTotalAmount }
+
+            // 2. Tiền đã đóng góp vào Quỹ chung
+            val fundContributed = fundContributions
+                .filter { it.memberId == member.id }
+                .sumOfSafe { it.convertedAmount }
+
+            // Tổng tiền thành viên đã thực tế chi/nộp cho đoàn
+            val totalPaid = outOfPocket + fundContributed
+
+            // 3. Tiền phải chịu chi (Owed) từ các bảng phân bổ
+            val totalOwed = splits
+                .filter { it.memberId == member.id }
+                .sumOfSafe { it.amount }
+
+            // 4. Số dư ròng (Balance) = Paid - Owed
+            val balance = totalPaid - totalOwed
+
+            val status = when {
+                balance > 0 -> BalanceStatus.RECEIVE
+                balance < 0 -> BalanceStatus.PAY
+                else -> BalanceStatus.BALANCED
+            }
+
+            MemberFinancialStatus(
+                member = member,
+                totalPaid = totalPaid,
+                outOfPocketPaid = outOfPocket,
+                fundContributed = fundContributed,
+                totalOwed = totalOwed,
+                balance = balance,
+                status = status
+            )
+        }
+
+        val memberIds = members.map { it.id }.toSet()
+
+        // ĐỐI SOÁT TÀI CHÍNH KẾ TOÁN (Reconciliation):
+        // 1. Phân bổ chi phí: Mỗi khoản chi phải có tổng số tiền phân bổ trong splits đúng bằng số tiền của khoản chi
+        val splitsByExpense = splits.groupBy { it.expenseId }
+        val splitDiscrepancy = expenses.sumOfSafe { exp ->
+            val expSplits = splitsByExpense[exp.id] ?: emptyList()
+            kotlin.math.abs(exp.convertedTotalAmount - expSplits.sumOfSafe { it.amount })
+        }
+
+        // 2. Kiểm tra người chi cá nhân: Khoản chi cá nhân phải có người chi thuộc danh sách thành viên đoàn
+        val unassignedPayerAmount = expenses
+            .filter { it.payerType == "MEMBER" && (it.payerMemberId == null || !memberIds.contains(it.payerMemberId)) }
+            .sumOfSafe { it.convertedTotalAmount }
+
+        // 3. Kiểm tra người nộp quỹ: Khoản nộp quỹ phải có người nộp thuộc danh sách thành viên đoàn
+        val unassignedFundAmount = fundContributions
+            .filter { !memberIds.contains(it.memberId) }
+            .sumOfSafe { it.convertedAmount }
+
+        // 4. Kiểm tra phân bổ mồ côi: Split không được gán cho người không thuộc đoàn
+        val orphanSplitAmount = splits
+            .filter { !memberIds.contains(it.memberId) }
+            .sumOfSafe { it.amount }
+
+        // Tổng chênh lệch đối soát thực tế:
+        // Sổ sách chỉ được coi là cân bằng khi mọi khoản chi được phân bổ chính xác 100% (chênh lệch = 0đ)
+        // và mọi dòng tiền thu/chi đều có thành viên hợp lệ chịu trách nhiệm
+        val discrepancy = splitDiscrepancy + unassignedPayerAmount + unassignedFundAmount + orphanSplitAmount
+        val isBalanced = members.isNotEmpty() && discrepancy == 0L
+
+        val summary = FinancialSummary(
+            totalExpenses = totalExpenseSum,
+            personalPaidExpenses = personalPaidExpensesSum,
+            fundPaidExpenses = fundPaidExpensesSum,
+            totalFundCollected = totalFundCollected,
+            remainingFund = remainingFund,
+            isBalanced = isBalanced,
+            balanceDiscrepancy = discrepancy,
+            memberCount = members.size,
+            expenseCount = expenses.size
+        )
+
+        return summary to memberStatuses
     }
 
     // ==========================================

@@ -3,6 +3,7 @@ package com.example.domain.engine
 import com.example.data.entity.TripMemberEntity
 import com.example.domain.model.MemberFinancialStatus
 import com.example.domain.model.SettlementTransfer
+import com.example.domain.model.sumOfSafe
 import java.util.UUID
 import kotlin.math.abs
 import kotlin.math.roundToLong
@@ -99,7 +100,7 @@ object SplitCalculator {
      */
     fun validateSplits(totalAmount: Long, splits: List<Pair<String, Long>>): Boolean {
         if (splits.isEmpty() && totalAmount == 0L) return true
-        return splits.sumOf { it.second } == totalAmount
+        return splits.sumOfSafe { it.second } == totalAmount
     }
 }
 
@@ -131,13 +132,18 @@ object SettlementEngine {
         fundHolder: TripMemberEntity? = null
     ): SettlementCalculationResult {
         lastReconciliationError = null
-        if (memberStatuses.isEmpty()) return SettlementCalculationResult(emptyList(), null)
+        if (memberStatuses.isEmpty()) {
+            val errorMsg = "Đoàn không có thành viên nào! Không thể thực hiện đối soát và quyết toán."
+            lastReconciliationError = errorMsg
+            return SettlementCalculationResult(emptyList(), errorMsg)
+        }
 
-        val totalMemberBalance = memberStatuses.sumOf { it.balance }
-        // Kiểm tra đối soát: Tổng balance toàn đoàn trừ đi số quỹ còn lại phải bằng 0 (cho phép lệch tối đa 5 đồng do làm tròn)
+        val totalMemberBalance = memberStatuses.sumOfSafe { it.balance }
+        // Kiểm tra đối soát: Tổng balance toàn đoàn trừ đi số quỹ còn lại phải bằng 0 tuyệt đối (Zero discrepancy tolerance)
+        // Không cho phép bất kỳ dung sai cố định 5 VND nào để chống thất thoát và lệch nhỏ tích lũy
         val discrepancy = totalMemberBalance - remainingFund
-        if (kotlin.math.abs(discrepancy) > 5L) {
-            val errorMsg = "Chưa thể tạo kế hoạch chuyển khoản do có khoản chi chưa được phân bổ đủ tiền."
+        if (discrepancy != 0L) {
+            val errorMsg = "Phát hiện chênh lệch đối soát ($discrepancy VND). Chưa thể tạo kế hoạch chuyển khoản do các khoản thu chi chưa cân bằng tuyệt đối."
             lastReconciliationError = errorMsg
             return SettlementCalculationResult(
                 transfers = emptyList(),
@@ -264,5 +270,16 @@ object SettlementEngine {
         }
 
         return transfers
+    }
+}
+
+object CashFlowMinimizer {
+    fun minimizeTransfers(
+        memberStatuses: List<MemberFinancialStatus>,
+        tripJoinCode: String = "",
+        remainingFund: Long = 0L,
+        fundHolder: TripMemberEntity? = null
+    ): List<SettlementTransfer> {
+        return SettlementEngine.computeSimplifiedTransfers(memberStatuses, tripJoinCode, remainingFund, fundHolder)
     }
 }

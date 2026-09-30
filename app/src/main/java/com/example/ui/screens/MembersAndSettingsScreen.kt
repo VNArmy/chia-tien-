@@ -828,6 +828,9 @@ fun ExchangeRatesDialog(
     var selectedCode by remember { mutableStateOf("USD") }
     var rateValueText by remember { mutableStateOf("25450") }
 
+    val rateValidation = com.example.domain.model.FinancialInputValidator.parseRate(rateValueText, selectedCode)
+    val isRateValid = rateValidation is com.example.domain.model.RateValidationResult.Success
+
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
     val safeDismiss = {
@@ -890,6 +893,12 @@ fun ExchangeRatesDialog(
                     OutlinedTextField(
                         value = rateValueText,
                         onValueChange = { rateValueText = it },
+                        isError = rateValueText.isNotEmpty() && !isRateValid,
+                        supportingText = {
+                            if (rateValueText.isNotEmpty() && rateValidation is com.example.domain.model.RateValidationResult.Error) {
+                                Text(rateValidation.message, color = DangerRed, fontSize = 11.sp)
+                            }
+                        },
                         label = { Text("1 $selectedCode = ? VND", color = Color(0xFFDC2626)) },
                         textStyle = androidx.compose.ui.text.TextStyle(
                             color = Color(0xFFDC2626),
@@ -921,12 +930,13 @@ fun ExchangeRatesDialog(
                     onClick = {
                         focusManager.clearFocus()
                         keyboardController?.hide()
-                        val parsed = rateValueText.toDoubleOrNull()
+                        val parsed = (rateValidation as? com.example.domain.model.RateValidationResult.Success)?.rate
                         if (parsed != null && parsed > 0) {
                             onSave(selectedCode, parsed)
                             onDismiss()
                         }
                     },
+                    enabled = isRateValid,
                     colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary)
                 ) {
                     Text(if (lang == AppLanguage.VI) "Lưu tỷ giá" else "Save Rate")

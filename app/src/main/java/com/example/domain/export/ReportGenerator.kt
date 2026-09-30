@@ -8,6 +8,7 @@ import com.example.data.entity.TripMemberEntity
 import com.example.domain.model.FinancialSummary
 import com.example.domain.model.MemberFinancialStatus
 import com.example.domain.model.SettlementTransfer
+import com.example.domain.model.sumOfSafe
 import com.example.ui.components.NumberFormatUtils
 import java.text.SimpleDateFormat
 import java.util.*
@@ -143,7 +144,7 @@ object ReportGenerator {
             "OTHER" to "Chi phí khác"
         )
         expenses.groupBy { it.category }.forEach { (cat, list) ->
-            val sum = list.sumOf { it.convertedTotalAmount }
+            val sum = list.sumOfSafe { it.convertedTotalAmount }
             val pct = if (summary.totalExpenses > 0) (sum * 100.0 / summary.totalExpenses) else 0.0
             appendLine(String.format("  • %-20s: %15s (%4.1f%%) - %d khoản", catMap[cat] ?: cat, NumberFormatUtils.formatVnd(sum), pct, list.size))
         }
@@ -326,6 +327,39 @@ object ReportGenerator {
     }
 
     /**
+     * Vô hiệu hóa tấn công CSV Injection (Formula Injection) và thoát ký tự theo chuẩn RFC 4180:
+     * 1. Thay thế dấu xuống dòng trong ô để bảo toàn tính toàn vẹn của từng hàng dữ liệu.
+     * 2. Nếu ô bắt đầu bằng các ký tự công thức spreadsheet (=, +, -, @, tab, cr, pipe),
+     *    thêm tiền tố dấu nháy đơn (') theo chuẩn bảo mật OWASP để Excel / Google Sheets xử lý như văn bản thuần.
+     * 3. Thoát dấu ngoặc kép bằng cách nhân đôi (" -> "") theo chuẩn RFC 4180.
+     * 4. Đóng gói toàn bộ ô trong cặp dấu ngoặc kép ("...").
+     */
+    fun escapeCsv(value: Any?): String {
+        if (value == null) return "\"\""
+        var str = value.toString()
+            .replace("\r\n", " ")
+            .replace("\r", " ")
+            .replace("\n", " ")
+
+        val trimmed = str.trimStart()
+        val startsWithFormulaChar = trimmed.isNotEmpty() && (
+            trimmed.startsWith("=") ||
+            trimmed.startsWith("+") ||
+            trimmed.startsWith("-") ||
+            trimmed.startsWith("@") ||
+            trimmed.startsWith("\t") ||
+            trimmed.startsWith("|") ||
+            trimmed.startsWith("%")
+        )
+        if (startsWithFormulaChar && !str.startsWith("'")) {
+            str = "'$str"
+        }
+
+        val escaped = str.replace("\"", "\"\"")
+        return "\"$escaped\""
+    }
+
+    /**
      * Generates a clean, UTF-8 CSV string with BOM (`\uFEFF`) to guarantee flawless Vietnamese
      * rendering in Excel, Sheets, and all spreadsheet applications.
      */
@@ -344,9 +378,9 @@ object ReportGenerator {
 
         // Section 1: Trip Info
         appendLine("BÁO CÁO TỔNG KẾT TÀI CHÍNH VÀ QUYẾT TOÁN ĐOÀN")
-        appendLine("Tên đoàn,\"${trip?.title ?: ""}\"")
-        appendLine("Mã đoàn,\"${trip?.joinCode ?: ""}\"")
-        appendLine("Ngày xuất báo cáo,\"${dateFormat.format(Date())}\"")
+        appendLine("Tên đoàn,${escapeCsv(trip?.title ?: "")}")
+        appendLine("Mã đoàn,${escapeCsv(trip?.joinCode ?: "")}")
+        appendLine("Ngày xuất báo cáo,${escapeCsv(dateFormat.format(Date()))}")
         appendLine("Tổng chi tiêu đoàn (VND),${summary.totalExpenses}")
         appendLine("Chi hộ cá nhân (VND),${summary.personalPaidExpenses}")
         appendLine("Chi từ quỹ chung (VND),${summary.fundPaidExpenses}")
@@ -363,7 +397,7 @@ object ReportGenerator {
                 s.balance < 0 -> "Cần nộp"
                 else -> "Cân bằng"
             }
-            appendLine("${i + 1},\"${s.member.name}\",\"${s.member.role}\",${s.outOfPocketPaid},${s.fundContributed},${s.totalPaid},${s.totalOwed},${s.balance},\"$statusText\",\"${s.member.bankAccount ?: ""}\",\"${s.member.bankName ?: ""}\",\"${s.member.bankAccountHolder ?: ""}\"")
+            appendLine("${i + 1},${escapeCsv(s.member.name)},${escapeCsv(s.member.role)},${s.outOfPocketPaid},${s.fundContributed},${s.totalPaid},${s.totalOwed},${s.balance},${escapeCsv(statusText)},${escapeCsv(s.member.bankAccount ?: "")},${escapeCsv(s.member.bankName ?: "")},${escapeCsv(s.member.bankAccountHolder ?: "")}")
         }
         appendLine()
 
@@ -371,7 +405,7 @@ object ReportGenerator {
         appendLine("KẾ HOẠCH CHUYỂN KHOẢN QUYẾT TOÁN")
         appendLine("STT,Người chuyển,Người nhận,Số tiền (VND),Ngân hàng,Số tài khoản,Chủ tài khoản,Nội dung chuyển khoản")
         settlementTransfers.forEachIndexed { i, t ->
-            appendLine("${i + 1},\"${t.fromMember.name}\",\"${t.toMember.name}\",${t.amount},\"${t.toMember.bankName ?: ""}\",\"${t.toMember.bankAccount ?: ""}\",\"${t.toMember.bankAccountHolder ?: ""}\",\"${t.transferNote}\"")
+            appendLine("${i + 1},${escapeCsv(t.fromMember.name)},${escapeCsv(t.toMember.name)},${t.amount},${escapeCsv(t.toMember.bankName ?: "")},${escapeCsv(t.toMember.bankAccount ?: "")},${escapeCsv(t.toMember.bankAccountHolder ?: "")},${escapeCsv(t.transferNote)}")
         }
         appendLine()
 
@@ -389,7 +423,7 @@ object ReportGenerator {
             } else {
                 ""
             }
-            appendLine("${i + 1},\"${dateFormat.format(Date(e.timestamp))}\",\"${e.title}\",\"${e.category}\",\"$payer\",${e.totalAmount},\"${e.currency}\",${e.exchangeRate},${e.convertedTotalAmount},\"${e.splitType}\",\"$participantsDetail\",\"${e.note}\"")
+            appendLine("${i + 1},${escapeCsv(dateFormat.format(Date(e.timestamp)))},${escapeCsv(e.title)},${escapeCsv(e.category)},${escapeCsv(payer)},${e.totalAmount},${escapeCsv(e.currency)},${e.exchangeRate},${e.convertedTotalAmount},${escapeCsv(e.splitType)},${escapeCsv(participantsDetail)},${escapeCsv(e.note)}")
         }
         appendLine()
 
@@ -398,7 +432,7 @@ object ReportGenerator {
         appendLine("STT,Thời gian,Người nộp,Số tiền gốc,Ngoại tệ,Tỷ giá,Quy đổi VND,Ghi chú")
         funds.sortedBy { it.timestamp }.forEachIndexed { i, f ->
             val contributor = members.find { it.id == f.memberId }?.name ?: ""
-            appendLine("${i + 1},\"${dateFormat.format(Date(f.timestamp))}\",\"$contributor\",${f.amount},\"${f.currency}\",${f.exchangeRate},${f.convertedAmount},\"${f.note}\"")
+            appendLine("${i + 1},${escapeCsv(dateFormat.format(Date(f.timestamp)))},${escapeCsv(contributor)},${f.amount},${escapeCsv(f.currency)},${f.exchangeRate},${f.convertedAmount},${escapeCsv(f.note)}")
         }
     }
 }
